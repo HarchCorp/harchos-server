@@ -16,8 +16,7 @@ class ApiKeyResponse(BaseModel):
     created_at: datetime
     expires_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = {'from_attributes': True}
 
 class ApiKeyCreateResponse(BaseModel):
     """Response when creating an API key (includes full key once)."""

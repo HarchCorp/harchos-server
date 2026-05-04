@@ -133,5 +133,4 @@ class WorkloadResponse(BaseModel):
     error_message: str | None = None
     retry_count: int = 0
 
-    class Config:
-        from_attributes = True
+    model_config = {'from_attributes': True}

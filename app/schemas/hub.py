@@ -144,5 +144,4 @@ class HubResponse(BaseModel):
     endpoint: str | None = None
     active_workloads: int = 0
 
-    class Config:
-        from_attributes = True
+    model_config = {'from_attributes': True}

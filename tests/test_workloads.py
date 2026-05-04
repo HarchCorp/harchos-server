@@ -34,35 +34,36 @@ async def test_create_workload(client: AsyncClient, auth_headers: dict):
     response = await client.post("/v1/workloads", json=payload, headers=auth_headers)
     assert response.status_code == 201
     data = response.json()
-    assert data["name"] == "Test Training Job"
-    assert data["type"] == "training"
+    # Response uses Kubernetes-style nested structure
+    assert data["spec"]["name"] == "Test Training Job"
+    assert data["spec"]["type"] == "training"
     assert data["status"] == "pending"
-    assert data["priority"] == "high"
-    assert data["compute"]["gpu_count"] == 4
-    assert "id" in data
+    assert data["spec"]["priority"] == "high"
+    assert data["spec"]["compute"]["gpu_count"] == 4
     assert "metadata" in data
+    assert "id" in data["metadata"]
 
 
 @pytest.mark.asyncio
 async def test_get_workload(client: AsyncClient, auth_headers: dict):
     """Test getting a workload by ID."""
     # Create first
-    payload = {"name": "Get Test", "type": "inference"}
+    payload = {"name": "Get Test", "type": "inference", "compute": {"gpu_count": 1, "cpu_cores": 4, "memory_gb": 16.0, "storage_gb": 50.0}}
     create_resp = await client.post("/v1/workloads", json=payload, headers=auth_headers)
-    workload_id = create_resp.json()["id"]
+    workload_id = create_resp.json()["metadata"]["id"]
 
     # Get it
     response = await client.get(f"/v1/workloads/{workload_id}", headers=auth_headers)
     assert response.status_code == 200
-    assert response.json()["id"] == workload_id
+    assert response.json()["metadata"]["id"] == workload_id
 
 
 @pytest.mark.asyncio
 async def test_update_workload(client: AsyncClient, auth_headers: dict):
     """Test updating a workload."""
-    payload = {"name": "Update Test", "type": "fine_tuning"}
+    payload = {"name": "Update Test", "type": "fine_tuning", "compute": {"gpu_count": 1, "cpu_cores": 4, "memory_gb": 16.0, "storage_gb": 50.0}}
     create_resp = await client.post("/v1/workloads", json=payload, headers=auth_headers)
-    workload_id = create_resp.json()["id"]
+    workload_id = create_resp.json()["metadata"]["id"]
 
     response = await client.patch(
         f"/v1/workloads/{workload_id}",
@@ -76,9 +77,9 @@ async def test_update_workload(client: AsyncClient, auth_headers: dict):
 @pytest.mark.asyncio
 async def test_delete_workload(client: AsyncClient, auth_headers: dict):
     """Test deleting a workload."""
-    payload = {"name": "Delete Test", "type": "batch"}
+    payload = {"name": "Delete Test", "type": "batch", "compute": {"gpu_count": 1, "cpu_cores": 4, "memory_gb": 16.0, "storage_gb": 50.0}}
     create_resp = await client.post("/v1/workloads", json=payload, headers=auth_headers)
-    workload_id = create_resp.json()["id"]
+    workload_id = create_resp.json()["metadata"]["id"]
 
     response = await client.delete(f"/v1/workloads/{workload_id}", headers=auth_headers)
     assert response.status_code == 204

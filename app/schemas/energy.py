@@ -18,8 +18,7 @@ class EnergyReportResponse(BaseModel):
     period_end: datetime
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {'from_attributes': True}
 
 class EnergySummaryResponse(BaseModel):
     """Energy summary – matches SDK EnergySummary model.
@@ -57,5 +56,4 @@ class EnergyConsumptionResponse(BaseModel):
     renewable_percentage: float
     timestamp: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {'from_attributes': True}

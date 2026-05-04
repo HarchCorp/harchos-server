@@ -136,5 +136,4 @@ class ModelResponse(BaseModel):
     deployed_at: datetime | None = None
     inference_endpoint: str | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = {'from_attributes': True}

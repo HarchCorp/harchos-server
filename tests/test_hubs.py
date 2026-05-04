@@ -28,7 +28,8 @@ async def test_create_hub(client: AsyncClient, auth_headers: dict):
     response = await client.post("/v1/hubs", json=payload, headers=auth_headers)
     assert response.status_code == 201
     data = response.json()
-    assert data["name"] == "Test Hub"
+    # Response uses Kubernetes-style nested structure
+    assert data["spec"]["name"] == "Test Hub"
     assert data["status"] == "creating"
     assert data["capacity"]["total_gpus"] == 32
 
@@ -38,7 +39,7 @@ async def test_get_hub_capacity(client: AsyncClient, auth_headers: dict):
     """Test getting hub capacity."""
     payload = {"name": "Capacity Test Hub", "region": "Test"}
     create_resp = await client.post("/v1/hubs", json=payload, headers=auth_headers)
-    hub_id = create_resp.json()["id"]
+    hub_id = create_resp.json()["metadata"]["id"]
 
     response = await client.get(f"/v1/hubs/{hub_id}/capacity", headers=auth_headers)
     assert response.status_code == 200
