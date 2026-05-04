@@ -11,8 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.api_key import ApiKey
 from app.models.user import User
-from app.schemas.auth import ApiKeyCreateResponse, ApiKeyResponse, TokenResponse, UserInfo
-
+from app.schemas.auth import ApiKeyCreateResponse, TokenResponse, UserInfo
 
 class AuthService:
     """Handles API key and JWT token operations."""
@@ -40,7 +39,7 @@ class AuthService:
             return None
         key_hash = AuthService.hash_key(key)
         result = await db.execute(
-            select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.is_active == True)
+            select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.is_active.is_(True))
         )
         return result.scalar_one_or_none()
 

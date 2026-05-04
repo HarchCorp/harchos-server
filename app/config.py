@@ -1,8 +1,6 @@
 """Application configuration via pydantic-settings."""
 
-from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -39,6 +37,5 @@ class Settings(BaseSettings):
 
     # Default test API key (hashed on seed)
     default_api_key: str = "hsk_test_development_key_12345"
-
 
 settings = Settings()

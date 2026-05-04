@@ -1,6 +1,6 @@
 """Energy endpoints."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -11,12 +11,10 @@ from app.schemas.energy import (
     GreenWindowResponse,
     EnergyConsumptionResponse,
 )
-from app.schemas.common import PaginatedResponse
 from app.services.energy_service import EnergyService
 from app.api.deps import require_auth
 
 router = APIRouter()
-
 
 @router.get("/reports/{resource_id}", response_model=EnergyReportResponse)
 async def get_energy_report(
@@ -31,7 +29,6 @@ async def get_energy_report(
         raise HTTPException(status_code=404, detail="Energy report not found for resource")
     return result
 
-
 @router.get("/summary", response_model=EnergySummaryResponse)
 async def get_energy_summary(
     api_key: ApiKey = Depends(require_auth),
@@ -40,7 +37,6 @@ async def get_energy_summary(
     """Get energy summary across all hubs."""
     return await EnergyService.get_energy_summary(db)
 
-
 @router.get("/green-windows", response_model=list[GreenWindowResponse])
 async def get_green_windows(
     api_key: ApiKey = Depends(require_auth),
@@ -48,7 +44,6 @@ async def get_green_windows(
 ):
     """Get green energy windows for scheduling."""
     return await EnergyService.get_green_windows(db)
-
 
 @router.get("/consumption/{resource_id}", response_model=list[EnergyConsumptionResponse])
 async def get_consumption(

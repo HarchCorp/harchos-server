@@ -3,11 +3,10 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, DateTime, Float, Integer, ForeignKey
+from sqlalchemy import String, DateTime, Float
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
-
 
 class EnergyReport(Base):
     __tablename__ = "energy_reports"
@@ -31,7 +30,6 @@ class EnergyReport(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
     )
-
 
 class EnergyConsumption(Base):
     __tablename__ = "energy_consumption"

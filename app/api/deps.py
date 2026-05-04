@@ -9,10 +9,8 @@ from app.models.api_key import ApiKey
 from app.services.auth_service import AuthService
 from app.config import settings
 
-
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 bearer_scheme = HTTPBearer(auto_error=False)
-
 
 async def get_current_api_key(
     api_key: str | None = Depends(api_key_header),
@@ -41,7 +39,7 @@ async def get_current_api_key(
                 api_key_id = payload.get("api_key_id")
                 from sqlalchemy import select
                 result = await db.execute(
-                    select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.is_active == True)
+                    select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.is_active.is_(True))
                 )
                 return result.scalar_one_or_none()
             raise HTTPException(
@@ -60,7 +58,6 @@ async def get_current_api_key(
 
     # No auth provided – return None (some endpoints may be public)
     return None
-
 
 async def require_auth(
     api_key: ApiKey | None = Depends(get_current_api_key),

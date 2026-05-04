@@ -1,7 +1,5 @@
 """Hub service – CRUD operations for hubs."""
 
-from datetime import datetime, timezone
-
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,12 +12,9 @@ from app.schemas.hub import (
     HubSpec,
     HubCapacity,
     HubCarbonMetrics,
-    HubLocation,
-    HubEnergy,
     DataResidencySpec,
 )
 from app.schemas.common import PaginatedResponse
-
 
 class HubService:
     """Service for hub CRUD operations."""

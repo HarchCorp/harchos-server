@@ -3,11 +3,10 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, DateTime, Integer, Float, Boolean
+from sqlalchemy import String, DateTime, Integer, Float
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
-
 
 class Hub(Base):
     __tablename__ = "hubs"

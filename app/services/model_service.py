@@ -1,7 +1,6 @@
 """Model service – CRUD operations for ML models."""
 
 import json
-from datetime import datetime, timezone
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,12 +12,9 @@ from app.schemas.model import (
     ModelResponse,
     ModelMetadata,
     ModelSpecSchema,
-    ModelSize,
     ModelCapabilities,
-    DataResidencySpec,
 )
 from app.schemas.common import PaginatedResponse
-
 
 class ModelService:
     """Service for model CRUD operations."""

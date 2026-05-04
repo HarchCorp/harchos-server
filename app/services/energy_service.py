@@ -7,14 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.hub import Hub
 from app.models.energy import EnergyReport, EnergyConsumption
-from app.models.workload import Workload
 from app.schemas.energy import (
     EnergyReportResponse,
     EnergySummaryResponse,
     GreenWindowResponse,
     EnergyConsumptionResponse,
 )
-
 
 class EnergyService:
     """Service for energy-related operations."""

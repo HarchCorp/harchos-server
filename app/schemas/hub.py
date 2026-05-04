@@ -5,10 +5,8 @@ The SDK expects Kubernetes-style nested responses with
 """
 
 from datetime import datetime, timezone
-from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Nested sub-schemas used inside the response
@@ -24,7 +22,6 @@ class HubMetadata(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
     annotations: dict[str, str] = Field(default_factory=dict)
 
-
 class DataResidencySpec(BaseModel):
     """Data residency policy – matches SDK DataResidencyPolicy."""
 
@@ -34,7 +31,6 @@ class DataResidencySpec(BaseModel):
     encryption_at_rest: bool = True
     encryption_in_transit: bool = True
     key_management_region: str | None = None
-
 
 class HubSpec(BaseModel):
     """Hub specification – matches SDK HubSpec."""
@@ -51,7 +47,6 @@ class HubSpec(BaseModel):
     carbon_aware_scheduling: bool = True
     labels: dict[str, str] = Field(default_factory=dict)
 
-
 class HubCapacity(BaseModel):
     """Hub capacity information – matches SDK HubCapacity."""
 
@@ -64,7 +59,6 @@ class HubCapacity(BaseModel):
     total_storage_gb: float = 0.0
     available_storage_gb: float = 0.0
 
-
 class HubCarbonMetrics(BaseModel):
     """Carbon metrics – matches SDK CarbonMetrics."""
 
@@ -74,7 +68,6 @@ class HubCarbonMetrics(BaseModel):
     region_grid_intensity: float = 0.0
     renewable_percentage: float = 0.0
     measured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
 
 # ---------------------------------------------------------------------------
 # Legacy sub-schemas (still used by create / update paths)
@@ -87,13 +80,11 @@ class HubLocation(BaseModel):
     city: str = ""
     country: str = ""
 
-
 class HubEnergy(BaseModel):
     """Hub energy information."""
     renewable_percentage: float = 0.0
     grid_carbon_intensity: float = 0.0
     pue: float = 1.0
-
 
 # ---------------------------------------------------------------------------
 # Create / Update schemas (accept what the SDK sends)
@@ -119,7 +110,6 @@ class HubCreate(BaseModel):
     energy: HubEnergy | None = None
     data_residency_policy: str | None = None
 
-
 class HubUpdate(BaseModel):
     """Schema for updating a hub."""
     name: str | None = None
@@ -138,7 +128,6 @@ class HubUpdate(BaseModel):
     location: HubLocation | None = None
     energy: HubEnergy | None = None
     data_residency_policy: str | None = None
-
 
 # ---------------------------------------------------------------------------
 # Response schema – matches the SDK Hub model exactly

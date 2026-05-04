@@ -1,10 +1,9 @@
 """Common schemas for pagination and shared types."""
 
-from typing import Any, Generic, TypeVar
-from pydantic import BaseModel, Field
+from typing import Generic, TypeVar
+from pydantic import BaseModel
 
 T = TypeVar("T")
-
 
 class PaginationMeta(BaseModel):
     """Pagination metadata matching the SDK's expected format."""
@@ -14,7 +13,6 @@ class PaginationMeta(BaseModel):
     total_pages: int
     has_next: bool
     has_prev: bool
-
 
 class PaginatedResponse(BaseModel, Generic[T]):
     """Paginated response wrapper matching the SDK's expected format."""

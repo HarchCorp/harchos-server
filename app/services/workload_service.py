@@ -1,9 +1,6 @@
 """Workload service – CRUD operations for workloads."""
 
-import math
-from datetime import datetime, timezone
-
-from sqlalchemy import select, func, update as sa_update
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workload import Workload
@@ -14,12 +11,9 @@ from app.schemas.workload import (
     WorkloadMetadata,
     WorkloadSpecSchema,
     WorkloadCompute,
-    WorkloadSovereignty,
-    WorkloadCarbonMetrics,
     DataResidencySpec,
 )
 from app.schemas.common import PaginatedResponse
-
 
 class WorkloadService:
     """Service for workload CRUD operations."""

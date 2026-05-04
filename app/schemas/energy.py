@@ -1,10 +1,8 @@
 """Energy Pydantic schemas matching the SDK model."""
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel
-
 
 class EnergyReportResponse(BaseModel):
     """Energy report response."""
@@ -23,7 +21,6 @@ class EnergyReportResponse(BaseModel):
     class Config:
         from_attributes = True
 
-
 class EnergySummaryResponse(BaseModel):
     """Energy summary – matches SDK EnergySummary model.
 
@@ -40,7 +37,6 @@ class EnergySummaryResponse(BaseModel):
     period_start: datetime
     period_end: datetime
 
-
 class GreenWindowResponse(BaseModel):
     """A green energy window for scheduling — matches SDK GreenWindow model."""
     hub_id: str
@@ -50,7 +46,6 @@ class GreenWindowResponse(BaseModel):
     renewable_percentage: float
     estimated_co2_grams_per_kwh: float
     recommended: bool
-
 
 class EnergyConsumptionResponse(BaseModel):
     """Energy consumption data point."""

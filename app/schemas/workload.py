@@ -5,10 +5,8 @@ The SDK expects Kubernetes-style nested responses with
 """
 
 from datetime import datetime, timezone
-from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Nested sub-schemas
@@ -24,7 +22,6 @@ class WorkloadCompute(BaseModel):
     storage_gb: float = 10.0
     ephemeral_storage_gb: float | None = None
 
-
 class WorkloadCarbonMetrics(BaseModel):
     """Carbon metrics – matches SDK CarbonMetrics."""
 
@@ -35,14 +32,12 @@ class WorkloadCarbonMetrics(BaseModel):
     renewable_percentage: float = 0.0
     measured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-
 class WorkloadSovereignty(BaseModel):
     """Sovereignty configuration – legacy, kept for backward-compat create path."""
 
     level: str = "standard"
     data_residency_policy: str = ""
     carbon_metrics: WorkloadCarbonMetrics = Field(default_factory=WorkloadCarbonMetrics)
-
 
 class WorkloadMetadata(BaseModel):
     """Resource metadata – matches SDK ResourceMetadata."""
@@ -55,7 +50,6 @@ class WorkloadMetadata(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
     annotations: dict[str, str] = Field(default_factory=dict)
 
-
 class DataResidencySpec(BaseModel):
     """Data residency policy – matches SDK DataResidencyPolicy."""
 
@@ -65,7 +59,6 @@ class DataResidencySpec(BaseModel):
     encryption_at_rest: bool = True
     encryption_in_transit: bool = True
     key_management_region: str | None = None
-
 
 class WorkloadSpecSchema(BaseModel):
     """Workload specification – matches SDK WorkloadSpec."""
@@ -85,7 +78,6 @@ class WorkloadSpecSchema(BaseModel):
     max_duration_seconds: int | None = None
     labels: dict[str, str] = Field(default_factory=dict)
     auto_restart: bool = False
-
 
 # ---------------------------------------------------------------------------
 # Create / Update schemas
@@ -112,7 +104,6 @@ class WorkloadCreate(BaseModel):
     # Legacy fields (older clients)
     sovereignty: WorkloadSovereignty | None = None
 
-
 class WorkloadUpdate(BaseModel):
     """Schema for updating a workload."""
     name: str | None = None
@@ -124,7 +115,6 @@ class WorkloadUpdate(BaseModel):
     sovereignty: WorkloadSovereignty | None = None
     sovereignty_level: str | None = None
     data_residency: DataResidencySpec | None = None
-
 
 # ---------------------------------------------------------------------------
 # Response schema – matches the SDK Workload model exactly

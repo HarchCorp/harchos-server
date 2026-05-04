@@ -3,11 +3,10 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, DateTime, Integer, Float, ForeignKey, Text
+from sqlalchemy import String, DateTime, Integer, Float, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
-
 
 class Workload(Base):
     __tablename__ = "workloads"
