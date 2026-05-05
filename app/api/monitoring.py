@@ -17,6 +17,7 @@ from app.models.hub import Hub
 from app.models.workload import Workload
 from app.models.carbon import CarbonOptimizationLog
 from app.config import settings
+from app.cache import cache
 
 router = APIRouter()
 
@@ -44,15 +45,24 @@ class PlatformMetrics(BaseModel):
     total_co2_saved_kg: float = Field(..., description="Total CO2 saved via carbon-aware scheduling")
 
 
+class CacheStatus(BaseModel):
+    """Cache backend status."""
+    available: bool = Field(..., description="Whether cache is available")
+    backend: str = Field(..., description="Cache backend type (upstash_redis / in_memory)")
+
+
 class DetailedHealth(BaseModel):
     """Detailed health check response."""
 
     status: str = Field("healthy", description="Overall system status")
     database_status: str = Field(..., description="Database connectivity status")
+    cache_status: CacheStatus = Field(..., description="Cache backend status")
     api_version: str = Field(..., description="API version")
+    environment: str = Field(..., description="Current environment (dev/staging/production)")
     uptime_seconds: float = Field(..., description="Server uptime in seconds")
     total_endpoints: int = Field(..., description="Total number of API endpoints")
     active_connections: int = Field(0, description="Active database connections (estimated)")
+    carbon_api_configured: bool = Field(..., description="Whether Electricity Maps API key is set")
     timestamp: datetime = Field(..., description="Current server timestamp")
 
 
@@ -138,7 +148,7 @@ async def detailed_health_check(
 ):
     """Detailed health check with system information.
 
-    Returns database status, API version, uptime, endpoint count,
+    Returns database status, cache status, API version, uptime, endpoint count,
     and active connection estimate.  Useful for monitoring dashboards
     and alerting systems.
     """
@@ -148,6 +158,10 @@ async def detailed_health_check(
         await db.execute(select(1))
     except Exception:
         db_status = "unhealthy"
+
+    # Cache status
+    cache_backend = "upstash_redis" if settings.upstash_redis_url else "in_memory"
+    cache_available = cache.is_available()
 
     # Count total API endpoints from the app
     total_endpoints = 0
@@ -161,12 +175,24 @@ async def detailed_health_check(
 
     uptime = time.time() - _start_time
 
+    overall_status = "healthy"
+    if db_status == "unhealthy":
+        overall_status = "degraded"
+    elif not cache_available:
+        overall_status = "degraded"
+
     return DetailedHealth(
-        status="healthy" if db_status == "healthy" else "degraded",
+        status=overall_status,
         database_status=db_status,
+        cache_status=CacheStatus(
+            available=cache_available,
+            backend=cache_backend,
+        ),
         api_version=settings.app_version,
+        environment=settings.environment,
         uptime_seconds=round(uptime, 2),
         total_endpoints=total_endpoints,
         active_connections=0,
+        carbon_api_configured=bool(settings.electricity_maps_api_key),
         timestamp=datetime.now(timezone.utc),
     )

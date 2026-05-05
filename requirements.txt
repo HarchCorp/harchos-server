@@ -20,11 +20,11 @@ pydantic-settings==2.7.1
 # Auth
 PyJWT==2.10.1
 
-# HTTP client (for tests)
+# HTTP client (for Electricity Maps API calls)
 httpx==0.28.1
 
-# Caching
-redis==5.2.1
+# Caching — Upstash Redis (REST API, no TCP needed)
+upstash-redis==1.2.0
 
 # Metrics
 prometheus-client==0.21.1

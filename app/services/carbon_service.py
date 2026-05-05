@@ -26,6 +26,7 @@ from sqlalchemy import select, func, and_, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.cache import cache, get_cached_json, set_cached_json
 from app.models.carbon import CarbonIntensityRecord, CarbonOptimizationLog
 from app.models.hub import Hub
 from app.schemas.carbon import (
@@ -195,16 +196,41 @@ class CarbonService:
     async def get_zone_intensity(
         db: AsyncSession, zone: str, *, use_cache: bool = True,
     ) -> CarbonIntensityZoneResponse:
-        """Get carbon intensity for a zone, using live API → DB cache → static fallback.
+        """Get carbon intensity for a zone, using Redis → live API → DB → static fallback.
 
         Resolution order:
-        1. Recent DB record (< 30 min old)
+        1. Redis cache (< 30 min TTL)
         2. Live API (Electricity Maps or Carbon Intensity UK)
-        3. Static fallback data
+        3. Recent DB record (< 30 min old)
+        4. Static fallback data
         """
         now = datetime.now(timezone.utc)
 
-        # 1. Check DB for recent data (< 30 min)
+        # 1. Check Redis cache first (fastest path)
+        if use_cache:
+            cache_key = f"carbon:intensity:{zone}"
+            cached = await get_cached_json(cache_key)
+            if cached and cached.get("carbon_intensity_gco2_kwh"):
+                fuel_mix = []
+                if cached.get("fuel_mix"):
+                    try:
+                        fuel_mix = [FuelMixEntry(**e) for e in cached["fuel_mix"]]
+                    except (TypeError, ValueError):
+                        pass
+                return CarbonIntensityZoneResponse(
+                    zone=cached["zone"],
+                    zone_name=cached.get("zone_name", zone),
+                    carbon_intensity_gco2_kwh=cached["carbon_intensity_gco2_kwh"],
+                    renewable_percentage=cached.get("renewable_percentage", 0.0),
+                    fossil_percentage=cached.get("fossil_percentage", 0.0),
+                    fuel_mix=fuel_mix,
+                    source=cached.get("source", "redis_cache"),
+                    is_forecast=False,
+                    datetime=now,
+                    updated_at=now,
+                )
+
+        # 2. Check DB for recent data (< 30 min)
         if use_cache:
             recent = await db.execute(
                 select(CarbonIntensityRecord)
@@ -260,6 +286,22 @@ class CarbonService:
             )
             db.add(db_record)
             await db.commit()
+
+            # Cache in Redis for fast subsequent lookups
+            cache_key = f"carbon:intensity:{zone}"
+            cache_data = {
+                "zone": zone,
+                "zone_name": static.get("zone_name", zone),
+                "carbon_intensity_gco2_kwh": float(ci),
+                "renewable_percentage": static.get("renewable_pct", 0.0),
+                "fossil_percentage": static.get("fossil_pct", 0.0),
+                "fuel_mix": [],
+                "source": source,
+            }
+            await set_cached_json(
+                cache_key, cache_data,
+                ttl_seconds=settings.carbon_cache_ttl_minutes * 60,
+            )
 
             return CarbonIntensityZoneResponse(
                 zone=zone,

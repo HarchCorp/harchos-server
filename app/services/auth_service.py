@@ -85,7 +85,7 @@ class AuthService:
             "iat": now,
             "exp": expires,
         }
-        token = jwt.encode(payload, settings.secret_key, algorithm="HS256")
+        token = jwt.encode(payload, settings.get_effective_secret_key(), algorithm="HS256")
         # Add token prefix
         token = f"{settings.token_prefix}{token}"
 
@@ -101,7 +101,7 @@ class AuthService:
         if token.startswith(settings.token_prefix):
             token = token[len(settings.token_prefix):]
         try:
-            payload = jwt.decode(token, settings.secret_key, algorithms=["HS256"])
+            payload = jwt.decode(token, settings.get_effective_secret_key(), algorithms=["HS256"])
             return payload
         except jwt.InvalidTokenError:
             return None
