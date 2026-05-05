@@ -15,6 +15,9 @@ async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown events."""
     # Startup
     await init_db()
+    # Auto-seed on first run
+    from app.seed import seed
+    await seed()
     yield
     # Shutdown
 

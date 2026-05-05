@@ -20,7 +20,7 @@ from app.schemas.carbon import (
     CarbonOptimizeResponse,
 )
 from app.services.carbon_service import CarbonService
-from app.api.deps import require_auth
+from app.api.deps import require_auth, get_current_api_key
 
 router = APIRouter()
 
@@ -32,7 +32,7 @@ router = APIRouter()
 @router.get("/intensity/{zone}", response_model=CarbonIntensityZoneResponse)
 async def get_zone_carbon_intensity(
     zone: str,
-    api_key: ApiKey = Depends(require_auth),
+    api_key: ApiKey | None = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ):
     """Get real-time carbon intensity for an electricity zone.
@@ -41,16 +41,18 @@ async def get_zone_carbon_intensity(
 
     Example zones: MA (Morocco), FR (France), DE (Germany), GB (UK),
     SE (Sweden), NO (Norway), IS (Iceland), etc.
+    
+    Public endpoint (auth optional).
     """
     return await CarbonService.get_zone_intensity(db, zone.upper())
 
 
 @router.get("/intensity", response_model=CarbonIntensityZoneListResponse)
 async def get_all_zone_intensities(
-    api_key: ApiKey = Depends(require_auth),
+    api_key: ApiKey | None = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get carbon intensity for all known electricity zones."""
+    """Get carbon intensity for all known electricity zones. Public endpoint (auth optional)."""
     return await CarbonService.get_all_zone_intensities(db)
 
 

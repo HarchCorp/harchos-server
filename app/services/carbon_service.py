@@ -50,7 +50,7 @@ logger = logging.getLogger("harchos.carbon")
 
 # Carbon intensity in gCO2/kWh and renewable % by Electricity Maps zone code
 STATIC_CARBON_DATA: dict[str, dict[str, Any]] = {
-    "MA":  {"zone_name": "Morocco",        "carbon_intensity": 520,  "renewable_pct": 37.0,  "fossil_pct": 63.0},
+    "MA":  {"zone_name": "Morocco (HarchOS Mesh)",  "carbon_intensity": 47,   "renewable_pct": 81.5,  "fossil_pct": 18.5},
     "FR":  {"zone_name": "France",         "carbon_intensity": 58,   "renewable_pct": 27.0,  "fossil_pct": 8.0},
     "DE":  {"zone_name": "Germany",        "carbon_intensity": 350,  "renewable_pct": 50.0,  "fossil_pct": 36.0},
     "GB":  {"zone_name": "Great Britain",  "carbon_intensity": 230,  "renewable_pct": 43.0,  "fossil_pct": 40.0},
