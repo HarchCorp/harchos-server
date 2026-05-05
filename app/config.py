@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "HarchOS Server"
-    app_version: str = "0.3.0"
+    app_version: str = "0.4.0"
     debug: bool = False  # SAFE DEFAULT: debug off in production
     environment: str = "production"  # dev / staging / production
     log_level: str = "INFO"  # DEBUG / INFO / WARNING / ERROR / CRITICAL
@@ -50,7 +50,9 @@ class Settings(BaseSettings):
     max_page_size: int = 100
 
     # Default test API key (hashed on seed) — ONLY for dev/testing
-    default_api_key: str = ""  # Empty: will be generated at seed time if not set
+    # Set HARCHOS_DEFAULT_API_KEY in Railway/env to use a fixed test key
+    # If empty, a random key is generated at seed time (logged once)
+    default_api_key: str = ""
 
     # Carbon-aware scheduling
     # Get your free trial key at: https://app.electricitymaps.com/auth/sign-up
