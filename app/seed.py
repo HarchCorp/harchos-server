@@ -2,15 +2,20 @@
 
 import asyncio
 import hashlib
+import logging
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.database import async_session_factory, init_db
 from app.models.user import User
 from app.models.api_key import ApiKey
 from app.models.hub import Hub
 from app.models.pricing import Pricing, BillingRecord
+from app.models.model import Model
 from app.config import settings
+from app.services.auth_service import AuthService
+
+logger = logging.getLogger("harchos.seed")
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +260,7 @@ async def seed():
         await session.flush()
 
         # Create default API key
-        test_key = settings.default_api_key
+        test_key = settings.default_api_key or AuthService.generate_api_key()
         key_hash = hashlib.sha256(test_key.encode()).hexdigest()
         key_prefix = test_key[:8]
 
@@ -270,7 +275,7 @@ async def seed():
         await session.flush()
 
         print(f"Created default user: {user.email}")
-        print(f"Created test API key: {test_key}")
+        logger.info("Created test API key: %s***", test_key[:8])
 
         # Create optimized Moroccan hubs
         for hub_data in MOROCCAN_HUBS:
@@ -289,6 +294,50 @@ async def seed():
         for plan_data in PRICING_PLANS:
             plan = Pricing(**plan_data)
             session.add(plan)
+
+        # --- Seed AI Models ---
+        model_count_result = await session.execute(select(func.count()).select_from(Model))
+        model_count = model_count_result.scalar() or 0
+        if model_count == 0:
+            logger.info("Seeding AI models...")
+            # Fetch hubs for model assignment
+            hubs_result = await session.execute(select(Hub).limit(1))
+            first_hub = hubs_result.scalar_one_or_none()
+            ai_models = [
+                {"name": "Llama 3.3 70B Instruct", "framework": "llama", "task": "text-generation", "status": "ready"},
+                {"name": "Llama 3.3 8B Instruct", "framework": "llama", "task": "text-generation", "status": "ready"},
+                {"name": "Llama 4 Maverick 17Bx128E", "framework": "llama", "task": "text-generation", "status": "ready"},
+                {"name": "Mistral Large 2411", "framework": "mistral", "task": "text-generation", "status": "ready"},
+                {"name": "Mistral Small 2501", "framework": "mistral", "task": "text-generation", "status": "ready"},
+                {"name": "Qwen 2.5 72B Instruct", "framework": "qwen", "task": "text-generation", "status": "ready"},
+                {"name": "Qwen 2.5 7B Instruct", "framework": "qwen", "task": "text-generation", "status": "ready"},
+                {"name": "DeepSeek V3", "framework": "deepseek", "task": "text-generation", "status": "ready"},
+                {"name": "DeepSeek R1 70B", "framework": "deepseek", "task": "reasoning", "status": "ready"},
+                {"name": "Gemma 3 27B IT", "framework": "gemma", "task": "text-generation", "status": "ready"},
+                {"name": "Gemma 3 4B IT", "framework": "gemma", "task": "text-generation", "status": "ready"},
+                {"name": "Phi-4 14B", "framework": "phi", "task": "text-generation", "status": "ready"},
+                {"name": "CodeGemma 7B", "framework": "gemma", "task": "code-generation", "status": "ready"},
+                {"name": "StarCoder2 15B", "framework": "starcoder", "task": "code-generation", "status": "ready"},
+                {"name": "Command R 35B", "framework": "cohere", "task": "text-generation", "status": "ready"},
+                {"name": "Command R+ 104B", "framework": "cohere", "task": "text-generation", "status": "ready"},
+                {"name": "Mixtral 8x22B Instruct", "framework": "mistral", "task": "text-generation", "status": "ready"},
+                {"name": "Mixtral 8x7B Instruct", "framework": "mistral", "task": "text-generation", "status": "ready"},
+                {"name": "Yi 1.5 34B Chat", "framework": "yi", "task": "text-generation", "status": "ready"},
+                {"name": "SOLAR 10.7B Instruct", "framework": "solar", "task": "text-generation", "status": "ready"},
+                {"name": "Llama Guard 4 12B", "framework": "llama", "task": "safety", "status": "ready"},
+                {"name": "HarchOS Embedding 3 Large", "framework": "embedding", "task": "embeddings", "status": "ready"},
+            ]
+            for model_data in ai_models:
+                model = Model(
+                    name=model_data["name"],
+                    framework=model_data["framework"],
+                    task=model_data["task"],
+                    status=model_data["status"],
+                    hub_id=first_hub.id if first_hub else None,
+                )
+                session.add(model)
+            await session.flush()
+            logger.info("Seeded %d AI models", len(ai_models))
 
         await session.commit()
         print(f"\nSeeded {len(PRICING_PLANS)} pricing plans:")

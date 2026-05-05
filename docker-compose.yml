@@ -6,9 +6,13 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://harchos:harchos@postgres:5432/harchos
-      - SECRET_KEY=change-this-in-production
-      - DEBUG=false
+      - HARCHOS_DATABASE_URL=postgresql+asyncpg://harchos:harchos@postgres:5432/harchos
+      - HARCHOS_SECRET_KEY=dev-secret-key-change-in-production
+      - HARCHOS_DEBUG=true
+      - HARCHOS_ENVIRONMENT=dev
+      - HARCHOS_ELECTRICITY_MAPS_API_KEY=
+      - HARCHOS_UPSTASH_REDIS_URL=
+      - HARCHOS_UPSTASH_REDIS_TOKEN=
     depends_on:
       postgres:
         condition: service_healthy

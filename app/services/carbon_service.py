@@ -367,10 +367,15 @@ class CarbonService:
         result = await db.execute(query)
         hubs = result.scalars().all()
 
+        # Fetch all zone intensities concurrently
+        import asyncio
+        zones = [_hub_to_zone(hub) for hub in hubs]
+        intensities = await asyncio.gather(
+            *[CarbonService.get_zone_intensity(db, zone) for zone in zones]
+        )
+        
         ranked = []
-        for hub in hubs:
-            zone = _hub_to_zone(hub)
-            intensity = await CarbonService.get_zone_intensity(db, zone)
+        for hub, zone, intensity in zip(hubs, zones, intensities):
             ranked.append({
                 "hub_id": hub.id,
                 "hub_name": hub.name,
@@ -835,9 +840,12 @@ class CarbonService:
         ]
 
         # Green windows
+        import asyncio
+        forecasts = await asyncio.gather(
+            *[CarbonService.get_forecast(db, z.zone, hours=12) for z in zones.zones[:5]]
+        )
         green_windows = []
-        for zone_resp in zones.zones[:5]:  # top 5 zones
-            forecast = await CarbonService.get_forecast(db, zone_resp.zone, hours=12)
+        for zone_resp, forecast in zip(zones.zones[:5], forecasts):
             for gw in forecast.green_windows:
                 gw["zone"] = zone_resp.zone
                 gw["zone_name"] = zone_resp.zone_name
@@ -859,7 +867,7 @@ class CarbonService:
 _COUNTRY_TO_ZONE: dict[str, str] = {
     "morocco": "MA",
     "maroc": "MA",
-    "morocco": "MA",
+    "al-maghrib": "MA",
     "france": "FR",
     "germany": "DE",
     "deutschland": "DE",

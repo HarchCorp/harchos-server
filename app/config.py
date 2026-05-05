@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     max_page_size: int = 100
 
     # Default test API key (hashed on seed) — ONLY for dev/testing
-    default_api_key: str = "hsk_test_development_key_12345"
+    default_api_key: str = ""  # Empty: will be generated at seed time if not set
 
     # Carbon-aware scheduling
     # Get your free trial key at: https://app.electricitymaps.com/auth/sign-up

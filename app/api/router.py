@@ -12,6 +12,8 @@ from app.api.carbon import router as carbon_router
 from app.api.pricing import router as pricing_router
 from app.api.regions import router as regions_router
 from app.api.monitoring import router as monitoring_router
+from app.api.inference import router as inference_router
+from app.api.metrics import router as metrics_router
 
 api_router = APIRouter()
 
@@ -25,3 +27,5 @@ api_router.include_router(carbon_router, prefix="/carbon", tags=["Carbon"])
 api_router.include_router(pricing_router, prefix="/pricing", tags=["Pricing"])
 api_router.include_router(regions_router, prefix="/regions", tags=["Regions"])
 api_router.include_router(monitoring_router, prefix="/monitoring", tags=["Monitoring"])
+api_router.include_router(inference_router, prefix="/inference", tags=["Inference"])
+api_router.include_router(metrics_router, prefix="/metrics", tags=["Metrics"])

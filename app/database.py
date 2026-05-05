@@ -30,11 +30,13 @@ if _is_postgres:
         "max_overflow": settings.db_max_overflow,
         "pool_recycle": settings.db_pool_recycle,
         "pool_pre_ping": True,  # Verify connections before use
-        "connect_args": {
-            "sslmode": "require",  # Required for Supabase
-            "statement_timeout": "30000",  # 30s query timeout
-        },
     })
+    # asyncpg uses ssl in connection string, not connect_args
+    # Add ?ssl=require to connection string if not already present
+    db_url = settings.database_url
+    if "ssl=" not in db_url and "sslmode=" not in db_url:
+        separator = "&" if "?" in db_url else "?"
+        settings.database_url = f"{db_url}{separator}ssl=require"
     logger.info(
         "Database: PostgreSQL (pool_size=%d, max_overflow=%d)",
         settings.db_pool_size, settings.db_max_overflow,

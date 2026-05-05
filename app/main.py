@@ -11,6 +11,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import settings
 from app.database import init_db, close_db
 from app.api.router import api_router
+from app.middleware.rate_limit import RateLimitMiddleware
+from app.middleware.metrics import MetricsMiddleware
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +133,12 @@ app.add_middleware(ProcessTimeMiddleware)
 
 # Security headers
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Rate limiting
+app.add_middleware(RateLimitMiddleware)
+
+# Prometheus metrics collection
+app.add_middleware(MetricsMiddleware)
 
 # CORS — restrictive by default, configure via HARCHOS_CORS_ORIGINS
 cors_origins = settings.cors_origins
