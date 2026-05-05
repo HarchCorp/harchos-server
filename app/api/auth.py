@@ -1,4 +1,4 @@
-"""Auth endpoints – API key management, token exchange, user info, registration."""
+"""Auth endpoints – API key management, token exchange, user info, registration, key revocation."""
 
 import hashlib
 import secrets
@@ -13,8 +13,17 @@ from app.models.api_key import ApiKey
 from app.models.user import User
 from app.schemas.auth import ApiKeyCreate, ApiKeyCreateResponse, TokenResponse, UserInfo
 from app.services.auth_service import AuthService
-from app.api.deps import require_auth, get_current_api_key
+from app.api.deps import require_auth, get_current_user, require_admin
 from app.config import settings
+from app.core.exceptions import (
+    HarchOSError,
+    already_exists,
+    not_found,
+    invalid_api_key,
+)
+from app.core.enums import UserRole
+from app.core.audit import audit_log
+from app.core.events import event_bus, EventType, emit_workload_event
 
 router = APIRouter()
 
@@ -33,6 +42,7 @@ class RegisterRequest(BaseModel):
     """Register a new user and get an API key."""
     email: EmailStr = Field(..., description="User email")
     name: str = Field(..., min_length=1, max_length=255, description="Full name")
+    role: str = Field("user", description="User role: admin, user, or viewer")
 
 
 class RegisterResponse(BaseModel):
@@ -40,6 +50,13 @@ class RegisterResponse(BaseModel):
     user: UserInfo
     api_key: ApiKeyCreateResponse
     token: TokenResponse
+
+
+class ApiKeyRevokeResponse(BaseModel):
+    """Response after revoking an API key."""
+    id: str
+    name: str
+    revoked: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +70,17 @@ async def create_api_key(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new API key for the authenticated user."""
-    return await AuthService.create_api_key(db, user_id=api_key.user_id, name=data.name)
+    result = await AuthService.create_api_key(db, user_id=api_key.user_id, name=data.name)
+
+    audit_log(
+        action="create",
+        resource_type="api_key",
+        resource_id=result.id,
+        actor_id=api_key.user_id,
+        details={"name": data.name},
+    )
+
+    return result
 
 
 @router.post("/token", response_model=TokenResponse)
@@ -73,15 +100,59 @@ async def exchange_api_key_for_token(
 
 
 @router.get("/me", response_model=UserInfo)
-async def get_current_user(
+async def get_current_user_info(
     api_key: ApiKey = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
     """Get current user info."""
     user_info = await AuthService.get_user_info(db, api_key.user_id)
     if not user_info:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise not_found("user", api_key.user_id)
     return user_info
+
+
+# ---------------------------------------------------------------------------
+# API key revocation
+# ---------------------------------------------------------------------------
+
+@router.delete("/api-keys/{key_id}", response_model=ApiKeyRevokeResponse)
+async def revoke_api_key(
+    key_id: str,
+    api_key: ApiKey = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Revoke (deactivate) an API key by its ID.
+
+    Users can only revoke their own API keys. Admins can revoke any key.
+    """
+    result = await db.execute(select(ApiKey).where(ApiKey.id == key_id))
+    target_key = result.scalar_one_or_none()
+
+    if not target_key:
+        raise not_found("api_key", key_id)
+
+    # Authorization: only own keys or admin
+    if target_key.user_id != api_key.user_id:
+        user_result = await db.execute(select(User).where(User.id == api_key.user_id))
+        user = user_result.scalar_one_or_none()
+        if not user or not user.is_admin:
+            raise not_found("api_key", key_id)  # 404, not 403
+
+    target_key.is_active = False
+    await db.flush()
+
+    audit_log(
+        action="revoke",
+        resource_type="api_key",
+        resource_id=key_id,
+        actor_id=api_key.user_id,
+    )
+
+    return ApiKeyRevokeResponse(
+        id=target_key.id,
+        name=target_key.name,
+        revoked=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -101,19 +172,23 @@ async def login(
     # Validate the API key
     api_key_obj = await AuthService.authenticate_api_key(db, data.api_key)
     if not api_key_obj:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-        )
+        raise invalid_api_key()
 
     # Verify the user exists and email matches
     user_result = await db.execute(select(User).where(User.id == api_key_obj.user_id))
     user = user_result.scalar_one_or_none()
     if not user or user.email.lower() != data.email.lower():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Email does not match API key owner",
-        )
+        raise HarchOSError("E0103", detail="Email does not match API key owner")
+
+    if not user.is_active:
+        raise HarchOSError("E0101", detail="Account is deactivated")
+
+    audit_log(
+        action="login",
+        resource_type="user",
+        resource_id=user.id,
+        actor_id=user.id,
+    )
 
     # Create JWT token
     return AuthService.create_jwt_token(
@@ -134,24 +209,24 @@ async def register(
     invitation system to prevent abuse.
     """
     if settings.is_production:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Public registration is disabled in production. Contact admin@harchos.ai for access.",
-        )
+        raise HarchOSError("E0105", detail="Public registration is disabled in production. Contact admin@harchos.ai for access.")
+
+    # Validate role
+    valid_roles = [r.value for r in UserRole]
+    if data.role not in valid_roles:
+        raise HarchOSError("E0201", detail=f"Invalid role '{data.role}'. Allowed: {', '.join(valid_roles)}", meta={"allowed": valid_roles})
 
     # Check if email already exists
     existing = await db.execute(select(User).where(User.email == data.email))
     if existing.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A user with this email already exists",
-        )
+        raise already_exists("user", "email")
 
-    # Create user
+    # Create user with role
     user = User(
         email=data.email,
         name=data.name,
         is_active=True,
+        role=data.role,
     )
     db.add(user)
     await db.flush()
@@ -162,13 +237,19 @@ async def register(
     )
 
     # Create JWT token
-    # We need the ApiKey object for token creation, fetch it
     api_key_obj_result = await db.execute(select(ApiKey).where(ApiKey.id == api_key_response.id))
     api_key_obj = api_key_obj_result.scalar_one()
 
     token_response = AuthService.create_jwt_token(
         api_key_id=api_key_obj.id,
         user_id=user.id,
+    )
+
+    audit_log(
+        action="register",
+        resource_type="user",
+        resource_id=user.id,
+        details={"email": data.email, "role": data.role},
     )
 
     return RegisterResponse(

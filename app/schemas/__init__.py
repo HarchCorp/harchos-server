@@ -1,6 +1,6 @@
 """Pydantic schemas package."""
 
-from app.schemas.common import PaginationMeta, PaginatedResponse
+from app.schemas.common import PaginationMeta, PaginatedResponse, DataResidencySpec
 from app.schemas.workload import (
     WorkloadCreate,
     WorkloadUpdate,
@@ -50,6 +50,7 @@ from app.schemas.auth import (
 __all__ = [
     "PaginationMeta",
     "PaginatedResponse",
+    "DataResidencySpec",
     "WorkloadCreate",
     "WorkloadUpdate",
     "WorkloadResponse",

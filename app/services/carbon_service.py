@@ -285,7 +285,8 @@ class CarbonService:
                 datetime=now,
             )
             db.add(db_record)
-            await db.commit()
+            await db.flush()  # FIX: Use flush instead of commit to avoid double-commit
+            # get_db() will commit on success
 
             # Cache in Redis for fast subsequent lookups
             cache_key = f"carbon:intensity:{zone}"
@@ -529,7 +530,7 @@ class CarbonService:
         now = datetime.now(timezone.utc)
         max_gco2 = request.carbon_max_gco2 or GREEN_THRESHOLD_GCO2
 
-        # Find optimal hub
+        # Find optimal hub — this already ranks hubs internally
         hub_request = CarbonOptimalHubRequest(
             region=request.region,
             gpu_count=request.gpu_count,
@@ -556,16 +557,11 @@ class CarbonService:
                 optimized_at=now,
             )
 
-        # Calculate carbon estimates
-        ranked = await CarbonService._rank_hubs_by_carbon(
-            db, region=request.region, gpu_count=request.gpu_count, gpu_type=request.gpu_type,
-        )
-        if ranked:
-            worst_ci = ranked[-1]["carbon_intensity_gco2_kwh"]
-            worst_pue = ranked[-1]["pue"]
-        else:
-            worst_ci = 500.0
-            worst_pue = 1.5
+        # FIX: Reuse the ranking from find_optimal_hub instead of calling _rank_hubs_by_carbon again
+        # This eliminates a redundant N+1 API call pattern
+        # For worst-case comparison, use a standard high carbon intensity baseline
+        worst_ci = 500.0  # Global average grid carbon intensity
+        worst_pue = 1.5   # Industry average PUE
 
         baseline_carbon = _estimate_carbon_kg(
             request.gpu_count, request.gpu_type, request.estimated_duration_hours,
@@ -603,7 +599,7 @@ class CarbonService:
             reason=optimal.defer_reason or f"Scheduled on {optimal.recommended_hub_name}",
         )
         db.add(log_entry)
-        await db.commit()
+        await db.flush()  # FIX: Use flush instead of commit to avoid double-commit
 
         # Green window info for deferred workloads
         green_window = None

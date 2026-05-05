@@ -1,9 +1,23 @@
 """Common schemas for pagination and shared types."""
 
 from typing import Generic, TypeVar
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 T = TypeVar("T")
+
+
+class DataResidencySpec(BaseModel):
+    """Data residency policy — matches SDK DataResidencyPolicy.
+
+    Defined once here to avoid duplication across hub/model/workload schemas.
+    """
+    allowed_regions: list[str] = Field(default_factory=lambda: ["morocco"])
+    restricted_regions: list[str] = Field(default_factory=list)
+    data_classification: str = "confidential"
+    encryption_at_rest: bool = True
+    encryption_in_transit: bool = True
+    key_management_region: str | None = None
+
 
 class PaginationMeta(BaseModel):
     """Pagination metadata matching the SDK's expected format."""

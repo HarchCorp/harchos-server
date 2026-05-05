@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
+from app.schemas.common import DataResidencySpec
+
 # ---------------------------------------------------------------------------
 # Nested sub-schemas
 # ---------------------------------------------------------------------------
@@ -49,16 +51,6 @@ class WorkloadMetadata(BaseModel):
     resource_type: str = "workload"
     labels: dict[str, str] = Field(default_factory=dict)
     annotations: dict[str, str] = Field(default_factory=dict)
-
-class DataResidencySpec(BaseModel):
-    """Data residency policy – matches SDK DataResidencyPolicy."""
-
-    allowed_regions: list[str] = Field(default_factory=lambda: ["morocco"])
-    restricted_regions: list[str] = Field(default_factory=list)
-    data_classification: str = "confidential"
-    encryption_at_rest: bool = True
-    encryption_in_transit: bool = True
-    key_management_region: str | None = None
 
 class WorkloadSpecSchema(BaseModel):
     """Workload specification – matches SDK WorkloadSpec."""

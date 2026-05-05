@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "HarchOS Server"
-    app_version: str = "0.4.0"
+    app_version: str = "0.5.0"
     debug: bool = False  # SAFE DEFAULT: debug off in production
     environment: str = "production"  # dev / staging / production
     log_level: str = "INFO"  # DEBUG / INFO / WARNING / ERROR / CRITICAL
@@ -76,6 +76,16 @@ class Settings(BaseSettings):
 
     # Security headers
     enable_security_headers: bool = True
+
+    # Inference backend — proxy to real LLM backends
+    # Supported: vLLM, Together AI, Ollama, any OpenAI-compatible API
+    inference_backend_url: str = ""  # e.g. http://vllm:8000/v1 or https://api.together.xyz/v1
+    inference_backend_api_key: str = ""  # API key for the backend
+    inference_backend_timeout_seconds: int = 30
+
+    # Webhook configuration
+    webhook_max_retries: int = 3
+    webhook_timeout_seconds: int = 10
 
     @property
     def is_production(self) -> bool:

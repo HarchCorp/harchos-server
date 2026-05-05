@@ -39,4 +39,5 @@ class UserInfo(BaseModel):
     email: str
     name: str
     is_active: bool
+    role: str = "user"
     created_at: datetime

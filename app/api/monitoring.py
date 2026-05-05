@@ -163,13 +163,16 @@ async def detailed_health_check(
     cache_backend = "upstash_redis" if settings.upstash_redis_url else "in_memory"
     cache_available = cache.is_available()
 
-    # Count total API endpoints from the app
+    # Count total API endpoints from the app (avoid circular import by late import)
     total_endpoints = 0
     try:
-        from app.main import app
-        for route in app.routes:
-            if hasattr(route, "methods"):
-                total_endpoints += len(route.methods)
+        import importlib
+        main_module = importlib.import_module("app.main")
+        app_obj = getattr(main_module, "app", None)
+        if app_obj:
+            for route in app_obj.routes:
+                if hasattr(route, "methods"):
+                    total_endpoints += len(route.methods)
     except Exception:
         total_endpoints = 0
 

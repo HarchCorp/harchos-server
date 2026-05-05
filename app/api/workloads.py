@@ -1,4 +1,4 @@
-"""Workloads endpoints."""
+"""Workloads endpoints with multi-tenancy, RBAC, and event emission."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func
@@ -6,14 +6,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.api_key import ApiKey
+from app.models.user import User
 from app.models.workload import Workload
 from app.schemas.workload import WorkloadCreate, WorkloadUpdate, WorkloadResponse
 from app.schemas.common import PaginatedResponse
 from app.services.workload_service import WorkloadService
-from app.api.deps import require_auth
+from app.api.deps import require_auth, require_write_access, get_current_user
 from app.config import settings
+from app.core.exceptions import not_found, validation_error, invalid_enum_value
+from app.core.enums import WorkloadType, WorkloadStatus, WorkloadPriority
+from app.core.events import emit_workload_event, EventType
+from app.core.audit import audit_log
 
 router = APIRouter()
+
+# Valid enum values for quick validation
+VALID_WORKLOAD_TYPES = [e.value for e in WorkloadType]
+VALID_WORKLOAD_STATUSES = [e.value for e in WorkloadStatus]
+VALID_PRIORITIES = [e.value for e in WorkloadPriority]
 
 
 @router.get("", response_model=PaginatedResponse[WorkloadResponse])
@@ -24,11 +34,26 @@ async def list_workloads(
     type: str | None = Query(None, alias="type", description="Filter by workload type"),
     hub_id: str | None = Query(None, description="Filter by hub ID"),
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List workloads with pagination."""
+    """List workloads with pagination.
+
+    - Regular users see only their own workloads
+    - Admins see all workloads
+    """
+    # Validate filter values
+    if status and status not in VALID_WORKLOAD_STATUSES:
+        raise invalid_enum_value("status", status, VALID_WORKLOAD_STATUSES)
+    if type and type not in VALID_WORKLOAD_TYPES:
+        raise invalid_enum_value("type", type, VALID_WORKLOAD_TYPES)
+
+    # Non-admin users can only see their own workloads
+    user_id_filter = None if user.is_admin else api_key.user_id
+
     return await WorkloadService.list_workloads(
-        db, page=page, per_page=per_page, status=status, workload_type=type, hub_id=hub_id
+        db, page=page, per_page=per_page, status=status,
+        workload_type=type, hub_id=hub_id, user_id=user_id_filter,
     )
 
 
@@ -37,15 +62,19 @@ async def list_active_workloads(
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(settings.default_page_size, ge=1, le=settings.max_page_size, description="Items per page"),
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List currently active workloads (running or scheduled).
+    """List currently active workloads (running and scheduled).
 
     Returns only workloads that are actively consuming GPU resources,
     sorted by creation time (most recent first).
     """
+    user_id_filter = None if user.is_admin else api_key.user_id
     return await WorkloadService.list_workloads(
-        db, page=page, per_page=per_page, status="running",
+        db, page=page, per_page=per_page,
+        status="running,scheduled",  # Fix: include both running AND scheduled
+        user_id=user_id_filter,
     )
 
 
@@ -53,39 +82,91 @@ async def list_active_workloads(
 async def create_workload(
     data: WorkloadCreate,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(require_write_access),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new workload."""
-    return await WorkloadService.create_workload(db, data)
+    """Create a new workload.
+
+    Requires write access (user or admin role). The workload is
+    automatically associated with the authenticated user.
+    """
+    # Validate enum fields
+    if data.type not in VALID_WORKLOAD_TYPES:
+        raise invalid_enum_value("type", data.type, VALID_WORKLOAD_TYPES)
+    if data.priority not in VALID_PRIORITIES:
+        raise invalid_enum_value("priority", data.priority, VALID_PRIORITIES)
+
+    result = await WorkloadService.create_workload(
+        db, data, user_id=api_key.user_id,
+    )
+
+    # Emit event
+    await emit_workload_event(
+        EventType.WORKLOAD_CREATED,
+        workload_id=result.metadata.id,
+        workload_name=data.name,
+        user_id=api_key.user_id,
+        hub_id=data.hub_id,
+    )
+
+    # Audit log
+    audit_log(
+        action="create",
+        resource_type="workload",
+        resource_id=result.metadata.id,
+        actor_id=api_key.user_id,
+        details={"name": data.name, "type": data.type, "gpu_count": data.compute.gpu_count},
+    )
+
+    return result
 
 
 @router.get("/stats")
 async def workload_stats(
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get workload statistics for the authenticated user."""
+    """Get workload statistics for the authenticated user.
+
+    - Regular users see only their own stats
+    - Admins see platform-wide stats
+    """
+    user_id_filter = None if user.is_admin else api_key.user_id
+
+    # Base query with user scoping
+    base_query = select(func.count(Workload.id))
+    if user_id_filter:
+        base_query = base_query.where(Workload.user_id == user_id_filter)
+
     # Total workloads
-    total_result = await db.execute(select(func.count(Workload.id)))
+    total_result = await db.execute(base_query)
     total = total_result.scalar() or 0
 
-    # Active workloads
+    # Active workloads (running + scheduled)
     active_result = await db.execute(
         select(func.count(Workload.id)).where(
-            Workload.status.in_(["running", "scheduled"])
+            Workload.status.in_(["running", "scheduled"]),
+            *([Workload.user_id == user_id_filter] if user_id_filter else []),
         )
     )
     active = active_result.scalar() or 0
 
     # Completed workloads
     completed_result = await db.execute(
-        select(func.count(Workload.id)).where(Workload.status == "completed")
+        select(func.count(Workload.id)).where(
+            Workload.status == "completed",
+            *([Workload.user_id == user_id_filter] if user_id_filter else []),
+        )
     )
     completed = completed_result.scalar() or 0
 
     # Failed workloads
     failed_result = await db.execute(
-        select(func.count(Workload.id)).where(Workload.status == "failed")
+        select(func.count(Workload.id)).where(
+            Workload.status == "failed",
+            *([Workload.user_id == user_id_filter] if user_id_filter else []),
+        )
     )
     failed = failed_result.scalar() or 0
 
@@ -101,12 +182,24 @@ async def workload_stats(
 async def get_workload(
     workload_id: str,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get a workload by ID."""
+    """Get a workload by ID.
+
+    Regular users can only access their own workloads.
+    """
     result = await WorkloadService.get_workload(db, workload_id)
     if not result:
-        raise HTTPException(status_code=404, detail="Workload not found")
+        raise not_found("workload", workload_id)
+
+    # Authorization check: non-admin users can only see their own workloads
+    if not user.is_admin:
+        wl = await db.execute(select(Workload.user_id).where(Workload.id == workload_id))
+        wl_user_id = wl.scalar_one_or_none()
+        if wl_user_id and wl_user_id != api_key.user_id:
+            raise not_found("workload", workload_id)  # Return 404, not 403, to avoid info leak
+
     return result
 
 
@@ -115,12 +208,57 @@ async def update_workload(
     workload_id: str,
     data: WorkloadUpdate,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(require_write_access),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a workload."""
+    """Update a workload.
+
+    Regular users can only update their own workloads.
+    """
+    # Authorization check
+    if not user.is_admin:
+        wl = await db.execute(select(Workload).where(Workload.id == workload_id))
+        wl_obj = wl.scalar_one_or_none()
+        if not wl_obj:
+            raise not_found("workload", workload_id)
+        if wl_obj.user_id and wl_obj.user_id != api_key.user_id:
+            raise not_found("workload", workload_id)
+
+    # Validate status if provided
+    if data.status and data.status not in VALID_WORKLOAD_STATUSES:
+        raise invalid_enum_value("status", data.status, VALID_WORKLOAD_STATUSES)
+
     result = await WorkloadService.update_workload(db, workload_id, data)
     if not result:
-        raise HTTPException(status_code=404, detail="Workload not found")
+        raise not_found("workload", workload_id)
+
+    # Emit event based on status change
+    if data.status:
+        event_map = {
+            "running": EventType.WORKLOAD_RUNNING,
+            "completed": EventType.WORKLOAD_COMPLETED,
+            "failed": EventType.WORKLOAD_FAILED,
+            "cancelled": EventType.WORKLOAD_CANCELLED,
+            "scheduled": EventType.WORKLOAD_SCHEDULED,
+            "paused": EventType.WORKLOAD_PAUSED,
+        }
+        event_type = event_map.get(data.status)
+        if event_type:
+            await emit_workload_event(
+                event_type, workload_id=workload_id,
+                workload_name=result.spec.name,
+                user_id=api_key.user_id,
+            )
+
+    # Audit log
+    audit_log(
+        action="update",
+        resource_type="workload",
+        resource_id=workload_id,
+        actor_id=api_key.user_id,
+        details=data.model_dump(exclude_unset=True),
+    )
+
     return result
 
 
@@ -128,9 +266,36 @@ async def update_workload(
 async def delete_workload(
     workload_id: str,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(require_write_access),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a workload."""
+    """Delete a workload.
+
+    Regular users can only delete their own workloads.
+    """
+    # Authorization check
+    if not user.is_admin:
+        wl = await db.execute(select(Workload).where(Workload.id == workload_id))
+        wl_obj = wl.scalar_one_or_none()
+        if not wl_obj:
+            raise not_found("workload", workload_id)
+        if wl_obj.user_id and wl_obj.user_id != api_key.user_id:
+            raise not_found("workload", workload_id)
+
     deleted = await WorkloadService.delete_workload(db, workload_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Workload not found")
+        raise not_found("workload", workload_id)
+
+    # Emit event
+    await emit_workload_event(
+        EventType.WORKLOAD_DELETED, workload_id=workload_id,
+        workload_name="", user_id=api_key.user_id,
+    )
+
+    # Audit log
+    audit_log(
+        action="delete",
+        resource_type="workload",
+        resource_id=workload_id,
+        actor_id=api_key.user_id,
+    )

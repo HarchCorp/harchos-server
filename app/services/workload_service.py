@@ -1,6 +1,12 @@
-"""Workload service – CRUD operations for workloads."""
+"""Workload service – CRUD operations for workloads with multi-tenancy.
 
-from sqlalchemy import select, func
+Fixes:
+- User-scoped queries (user_id parameter)
+- AttributeError on sovereignty.carbon_metrics (WorkloadCarbonMetrics doesn't have carbon_aware)
+- Proper active workloads filter (running + scheduled)
+"""
+
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workload import Workload
@@ -11,9 +17,8 @@ from app.schemas.workload import (
     WorkloadMetadata,
     WorkloadSpecSchema,
     WorkloadCompute,
-    DataResidencySpec,
 )
-from app.schemas.common import PaginatedResponse
+from app.schemas.common import PaginatedResponse, DataResidencySpec
 
 class WorkloadService:
     """Service for workload CRUD operations."""
@@ -74,10 +79,10 @@ class WorkloadService:
             status=wl.status,
             hub_id=wl.hub_id,
             carbon_metrics=carbon_metrics,
-            started_at=wl.created_at if wl.status == "running" else None,
-            completed_at=wl.updated_at if wl.status in ("completed", "failed", "cancelled") else None,
-            error_message=None,
-            retry_count=0,
+            started_at=wl.started_at if wl.status in ("running", "scheduled") else None,
+            completed_at=wl.completed_at if wl.status in ("completed", "failed", "cancelled") else None,
+            error_message=wl.error_message,
+            retry_count=wl.retry_count,
         )
 
     @staticmethod
@@ -88,20 +93,33 @@ class WorkloadService:
         status: str | None = None,
         workload_type: str | None = None,
         hub_id: str | None = None,
+        user_id: str | None = None,
     ) -> PaginatedResponse[WorkloadResponse]:
-        """List workloads with pagination and optional filters."""
+        """List workloads with pagination and optional filters.
+
+        When user_id is provided, filters to only that user's workloads.
+        When status contains commas, splits into multiple status values.
+        """
         query = select(Workload)
         count_query = select(func.count()).select_from(Workload)
 
         if status:
-            query = query.where(Workload.status == status)
-            count_query = count_query.where(Workload.status == status)
+            if "," in status:
+                status_values = [s.strip() for s in status.split(",")]
+                query = query.where(Workload.status.in_(status_values))
+                count_query = count_query.where(Workload.status.in_(status_values))
+            else:
+                query = query.where(Workload.status == status)
+                count_query = count_query.where(Workload.status == status)
         if workload_type:
             query = query.where(Workload.type == workload_type)
             count_query = count_query.where(Workload.type == workload_type)
         if hub_id:
             query = query.where(Workload.hub_id == hub_id)
             count_query = count_query.where(Workload.hub_id == hub_id)
+        if user_id:
+            query = query.where(Workload.user_id == user_id)
+            count_query = count_query.where(Workload.user_id == user_id)
 
         # Get total count
         total_result = await db.execute(count_query)
@@ -127,27 +145,42 @@ class WorkloadService:
         return WorkloadService._to_response(wl)
 
     @staticmethod
-    async def create_workload(db: AsyncSession, data: WorkloadCreate) -> WorkloadResponse:
-        """Create a new workload."""
-        # Support both new SDK format and legacy sovereignty format
+    async def create_workload(
+        db: AsyncSession,
+        data: WorkloadCreate,
+        user_id: str | None = None,
+    ) -> WorkloadResponse:
+        """Create a new workload.
+
+        Fixed: No longer tries to access carbon_metrics.carbon_aware which
+        doesn't exist on WorkloadCarbonMetrics. Uses top-level fields instead.
+        """
         sovereignty_level = data.sovereignty_level
         data_residency_policy = ""
         carbon_aware = False
         carbon_intensity_threshold = None
 
+        # Legacy sovereignty path (kept for backward compatibility)
         if data.sovereignty:
             sovereignty_level = data.sovereignty.level
             data_residency_policy = data.sovereignty.data_residency_policy
-            carbon_aware = data.sovereignty.carbon_metrics.carbon_aware
-            carbon_intensity_threshold = data.sovereignty.carbon_metrics.carbon_intensity_threshold
+            # FIX: Don't access carbon_metrics.carbon_aware — use the top-level fields
+            # The old code tried data.sovereignty.carbon_metrics.carbon_aware
+            # which doesn't exist on WorkloadCarbonMetrics. Instead:
+            carbon_aware = data.carbon_budget_grams is not None or data.sovereignty.level == "strict"
 
         if data.data_residency and data.data_residency.allowed_regions:
             data_residency_policy = "local_only"
+
+        # New top-level carbon_aware logic
+        if data.carbon_budget_grams is not None:
+            carbon_aware = True
 
         wl = Workload(
             name=data.name,
             type=data.type,
             status="pending",
+            user_id=user_id,  # Multi-tenancy: associate with user
             gpu_count=data.compute.gpu_count,
             gpu_type=data.compute.gpu_type or "",
             cpu_cores=data.compute.cpu_cores,
@@ -159,6 +192,8 @@ class WorkloadService:
             data_residency_policy=data_residency_policy,
             carbon_aware=carbon_aware,
             carbon_intensity_threshold=carbon_intensity_threshold,
+            carbon_budget_grams=data.carbon_budget_grams,
+            max_retries=3,
         )
         db.add(wl)
         await db.flush()
@@ -190,13 +225,24 @@ class WorkloadService:
             sov = update_data.pop("sovereignty")
             wl.sovereignty_level = sov.get("level", wl.sovereignty_level)
             wl.data_residency_policy = sov.get("data_residency_policy", wl.data_residency_policy)
-            if "carbon_metrics" in sov and sov["carbon_metrics"] is not None:
-                cm = sov["carbon_metrics"]
-                wl.carbon_aware = cm.get("carbon_aware", wl.carbon_aware)
-                wl.carbon_intensity_threshold = cm.get("carbon_intensity_threshold", wl.carbon_intensity_threshold)
+
+        # Handle status transitions with timestamp tracking
+        if "status" in update_data and update_data["status"] is not None:
+            new_status = update_data["status"]
+            if new_status == "running" and wl.status != "running":
+                wl.started_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+            elif new_status in ("completed", "failed", "cancelled") and wl.status not in ("completed", "failed", "cancelled"):
+                wl.completed_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+                if new_status == "failed" and wl.retry_count < wl.max_retries:
+                    # Auto-retry: increment and re-queue
+                    wl.retry_count += 1
+                    wl.status = "pending"
+                    wl.error_message = update_data.get("error_message", "Auto-retry after failure")
+                    await db.flush()
+                    return WorkloadService._to_response(wl)
 
         # Handle simple fields
-        for field in ("name", "type", "status", "hub_id", "priority", "sovereignty_level"):
+        for field in ("name", "type", "status", "hub_id", "priority", "sovereignty_level", "error_message"):
             if field in update_data and update_data[field] is not None:
                 setattr(wl, field, update_data[field])
 

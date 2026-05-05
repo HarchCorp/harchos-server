@@ -1,5 +1,6 @@
-"""FastAPI application with CORS, lifespan, security headers, and router aggregation."""
+"""FastAPI application with CORS, lifespan, security headers, error handling, and router aggregation."""
 
+import logging
 import time
 from contextlib import asynccontextmanager
 
@@ -13,6 +14,14 @@ from app.database import init_db, close_db
 from app.api.router import api_router
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.metrics import MetricsMiddleware
+from app.core.exceptions import HarchOSError, harchos_error_handler, unhandled_error_handler
+
+# Configure structured logging
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +36,7 @@ class ProcessTimeMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         elapsed_ms = (time.perf_counter() - start) * 1000
         response.headers["X-Process-Time-ms"] = f"{elapsed_ms:.1f}"
+        response.headers["Server"] = "HarchOS"  # Identify ourselves
         return response
 
 
@@ -45,6 +55,33 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers["X-XSS-Protection"] = "1; mode=block"
             response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
             response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+            response.headers["X-HarchOS-Version"] = settings.app_version
+        return response
+
+
+# ---------------------------------------------------------------------------
+# Request logging middleware
+# ---------------------------------------------------------------------------
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log all API requests with method, path, status, and duration."""
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        # Skip noisy paths
+        if request.url.path not in ("/docs", "/redoc", "/openapi.json", "/"):
+            logger = logging.getLogger("harchos.requests")
+            logger.info(
+                "%s %s → %d (%.1fms)",
+                request.method,
+                request.url.path,
+                response.status_code,
+                elapsed_ms,
+            )
+
         return response
 
 
@@ -55,8 +92,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown events."""
+    logger = logging.getLogger("harchos.main")
+
     # Startup
     await init_db()
+
     # Auto-seed on first run
     from app.seed import seed
     await seed()
@@ -64,16 +104,17 @@ async def lifespan(app: FastAPI):
     # Initialize Redis cache (optional)
     from app.cache import cache
     if cache.is_available():
-        import logging
-        logging.getLogger("harchos.main").info("Redis cache: CONNECTED")
+        logger.info("Redis cache: CONNECTED")
     else:
-        import logging
-        logging.getLogger("harchos.main").info("Redis cache: not configured (using in-memory fallback)")
+        logger.info("Redis cache: not configured (using in-memory fallback)")
+
+    logger.info("HarchOS Server v%s starting in %s mode", settings.app_version, settings.environment)
 
     yield
 
     # Shutdown
     await close_db()
+    logger.info("HarchOS Server shutting down")
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +137,9 @@ app = FastAPI(
         "with plans for Pan-African expansion\n"
         "- **Tiered Pricing**: Enterprise, Performance, and Standard tiers with "
         "transparent per-GPU-hour billing in USD, MAD, and EUR\n"
+        "- **OpenAI-Compatible Inference**: Drop-in replacement for OpenAI API "
+        "with automatic carbon footprint tracking per request\n"
+        "- **RBAC**: Role-based access control with admin, user, and viewer roles\n"
     ),
     lifespan=lifespan,
     contact={
@@ -123,6 +167,10 @@ app = FastAPI(
     ],
 )
 
+# Register exception handlers for structured error responses
+app.add_exception_handler(HarchOSError, harchos_error_handler)
+app.add_exception_handler(Exception, unhandled_error_handler)
+
 
 # ---------------------------------------------------------------------------
 # Middleware
@@ -130,6 +178,9 @@ app = FastAPI(
 
 # Timing middleware (must be first to capture full request time)
 app.add_middleware(ProcessTimeMiddleware)
+
+# Request logging
+app.add_middleware(RequestLoggingMiddleware)
 
 # Security headers
 app.add_middleware(SecurityHeadersMiddleware)
