@@ -29,6 +29,17 @@ from app.schemas.energy import (
     GreenWindowResponse,
     EnergyConsumptionResponse,
 )
+from app.schemas.carbon import (
+    CarbonIntensityZoneResponse,
+    CarbonIntensityZoneListResponse,
+    CarbonOptimalHubRequest,
+    CarbonOptimalHubResponse,
+    CarbonOptimizeRequest,
+    CarbonOptimizeResponse,
+    CarbonMetricsResponse,
+    CarbonDashboardResponse,
+    CarbonForecastResponse,
+)
 from app.schemas.auth import (
     ApiKeyCreate,
     ApiKeyResponse,
@@ -59,6 +70,15 @@ __all__ = [
     "EnergySummaryResponse",
     "GreenWindowResponse",
     "EnergyConsumptionResponse",
+    "CarbonIntensityZoneResponse",
+    "CarbonIntensityZoneListResponse",
+    "CarbonOptimalHubRequest",
+    "CarbonOptimalHubResponse",
+    "CarbonOptimizeRequest",
+    "CarbonOptimizeResponse",
+    "CarbonMetricsResponse",
+    "CarbonDashboardResponse",
+    "CarbonForecastResponse",
     "ApiKeyCreate",
     "ApiKeyResponse",
     "TokenResponse",

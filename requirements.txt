@@ -3,6 +3,7 @@
 # Web framework
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+python-multipart==0.0.20
 
 # Database
 sqlalchemy[asyncio]==2.0.36
@@ -21,6 +22,12 @@ PyJWT==2.10.1
 
 # HTTP client (for tests)
 httpx==0.28.1
+
+# Caching
+redis==5.2.1
+
+# Metrics
+prometheus-client==0.21.1
 
 # Testing
 pytest==8.3.4

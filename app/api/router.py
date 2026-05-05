@@ -8,6 +8,10 @@ from app.api.workloads import router as workloads_router
 from app.api.hubs import router as hubs_router
 from app.api.models import router as models_router
 from app.api.energy import router as energy_router
+from app.api.carbon import router as carbon_router
+from app.api.pricing import router as pricing_router
+from app.api.regions import router as regions_router
+from app.api.monitoring import router as monitoring_router
 
 api_router = APIRouter()
 
@@ -17,3 +21,7 @@ api_router.include_router(workloads_router, prefix="/workloads", tags=["Workload
 api_router.include_router(hubs_router, prefix="/hubs", tags=["Hubs"])
 api_router.include_router(models_router, prefix="/models", tags=["Models"])
 api_router.include_router(energy_router, prefix="/energy", tags=["Energy"])
+api_router.include_router(carbon_router, prefix="/carbon", tags=["Carbon"])
+api_router.include_router(pricing_router, prefix="/pricing", tags=["Pricing"])
+api_router.include_router(regions_router, prefix="/regions", tags=["Regions"])
+api_router.include_router(monitoring_router, prefix="/monitoring", tags=["Monitoring"])

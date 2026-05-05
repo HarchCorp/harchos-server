@@ -1,0 +1,86 @@
+version: "3.9"
+
+# Production Docker Compose for HarchOS Server
+# PostgreSQL 16 + Redis 7 + HarchOS API
+#
+# Usage:
+#   docker compose -f docker-compose.production.yml up -d
+#   docker compose -f docker-compose.production.yml exec api python -m app.seed
+
+services:
+  api:
+    build: .
+    container_name: harchos-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HARCHOS_DATABASE_URL=postgresql+asyncpg://harchos:${POSTGRES_PASSWORD:-harchos_prod_2025}@postgres:5432/harchos
+      - HARCHOS_SECRET_KEY=${SECRET_KEY:-change-this-in-production}
+      - HARCHOS_DEBUG=false
+      - HARCHOS_ENVIRONMENT=production
+      - HARCHOS_LOG_LEVEL=INFO
+      - HARCHOS_CORS_ORIGINS=["https://harchcorp.vercel.app","https://api.harchos.ai"]
+      - HARCHOS_REDIS_URL=redis://redis:6379/0
+      - HARCHOS_RATE_LIMIT_REQUESTS_PER_MINUTE=60
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - harchos-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: harchos-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: harchos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-harchos_prod_2025}
+      POSTGRES_DB: harchos
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harchos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - harchos-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: harchos-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - harchos-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  harchos-network:
+    driver: bridge
+    name: harchos-network
