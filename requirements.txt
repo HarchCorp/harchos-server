@@ -19,6 +19,7 @@ pydantic-settings==2.7.1
 
 # Auth
 PyJWT==2.10.1
+email-validator==2.2.0
 
 # HTTP client (for Electricity Maps API calls)
 httpx==0.28.1
