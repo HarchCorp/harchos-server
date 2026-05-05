@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: harchos-server
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: HARCHOS_DATABASE_URL
+        value: sqlite+aiosqlite:///./harchos.db
+      - key: HARCHOS_DEBUG
+        value: false
+      - key: HARCHOS_ENVIRONMENT
+        value: production
+      - key: HARCHOS_SECRET_KEY
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: 3.12.0
+    healthCheckPath: /v1/health
+    plan: free

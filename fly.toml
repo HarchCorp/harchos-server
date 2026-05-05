@@ -1,0 +1,24 @@
+app = "harchos-server"
+primary_region = "cdg"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HARCHOS_DATABASE_URL = "sqlite+aiosqlite:///./harchos.db"
+  HARCHOS_DEBUG = "false"
+  HARCHOS_ENVIRONMENT = "production"
+  HARCHOS_SECRET_KEY = "harchos-prod-secret-key-2026"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[http_service.checks]]
+  interval = "30s"
+  grace_period = "10s"
+  method = "GET"
+  path = "/v1/health"
