@@ -131,6 +131,62 @@ class InferenceModelFamily(str, Enum):
     EMBEDDING = "embedding"
 
 
+class ProjectTier(str, Enum):
+    """Project tier — determines default rate limits and feature access."""
+    FREE = "free"
+    STANDARD = "standard"
+    ENTERPRISE = "enterprise"
+
+
+class ApiKeyTier(str, Enum):
+    """API key tier — determines rate limits and quotas."""
+    FREE = "free"
+    STANDARD = "standard"
+    ENTERPRISE = "enterprise"
+
+
+class ApiKeyScope(str, Enum):
+    """Fine-grained API key scopes for project-scoped keys.
+
+    Format: resource:action where action is 'read' or 'write'.
+    A key with no scopes set has full access (backward compatible).
+    """
+    # Inference
+    INFERENCE_READ = "inference:read"
+    INFERENCE_WRITE = "inference:write"
+    # Workloads
+    WORKLOADS_READ = "workloads:read"
+    WORKLOADS_WRITE = "workloads:write"
+    # Carbon
+    CARBON_READ = "carbon:read"
+    CARBON_WRITE = "carbon:write"
+    # Models
+    MODELS_READ = "models:read"
+    MODELS_WRITE = "models:write"
+    # Billing
+    BILLING_READ = "billing:read"
+    BILLING_WRITE = "billing:write"
+    # Energy
+    ENERGY_READ = "energy:read"
+    ENERGY_WRITE = "energy:write"
+    # Hubs
+    HUBS_READ = "hubs:read"
+    HUBS_WRITE = "hubs:write"
+    # Regions
+    REGIONS_READ = "regions:read"
+    # Monitoring
+    MONITORING_READ = "monitoring:read"
+    # Batch
+    BATCH_READ = "batch:read"
+    BATCH_WRITE = "batch:write"
+    # Embeddings
+    EMBEDDINGS_READ = "embeddings:read"
+    EMBEDDINGS_WRITE = "embeddings:write"
+    # Fine-tuning
+    FINE_TUNING_READ = "fine_tuning:read"
+    FINE_TUNING_WRITE = "fine_tuning:write"
+
+
 class CarbonPreference(str, Enum):
     """Carbon-aware routing preference for inference."""
     LOWEST = "lowest"       # Route to greenest hub regardless of latency

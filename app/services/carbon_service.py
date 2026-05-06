@@ -336,12 +336,17 @@ class CarbonService:
     async def get_all_zone_intensities(
         db: AsyncSession,
     ) -> CarbonIntensityZoneListResponse:
-        """Get carbon intensity for all known zones."""
-        zones_data = []
-        for zone_code in STATIC_CARBON_DATA:
-            intensity = await CarbonService.get_zone_intensity(db, zone_code)
-            zones_data.append(intensity)
-        return CarbonIntensityZoneListResponse(zones=zones_data, total=len(zones_data))
+        """Get carbon intensity for all known zones.
+
+        Performance: Uses asyncio.gather for parallel fetching instead of
+        sequential loops. Was 21 sequential async ops, now runs in parallel.
+        """
+        import asyncio
+        zone_codes = list(STATIC_CARBON_DATA.keys())
+        intensities = await asyncio.gather(
+            *[CarbonService.get_zone_intensity(db, zone) for zone in zone_codes]
+        )
+        return CarbonIntensityZoneListResponse(zones=list(intensities), total=len(intensities))
 
     # ------------------------------------------------------------------
     # 2. Hub ranking & optimal hub selection
@@ -691,7 +696,7 @@ class CarbonService:
                             if current_green_start is not None and points:
                                 green_windows.append({
                                     "start": current_green_start.isoformat(),
-                                    "end": points[-1].reading_datetime.isoformat(),
+                                    "end": points[-1].datetime.isoformat(),
                                     "estimated_carbon_intensity_gco2_kwh": GREEN_THRESHOLD_GCO2,
                                 })
 
@@ -743,7 +748,7 @@ class CarbonService:
         if current_green_start is not None and points:
             green_windows.append({
                 "start": current_green_start.isoformat(),
-                "end": points[-1].reading_datetime.isoformat(),
+                "end": points[-1].datetime.isoformat(),
                 "estimated_carbon_intensity_gco2_kwh": GREEN_THRESHOLD_GCO2,
             })
 

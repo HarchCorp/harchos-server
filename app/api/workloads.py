@@ -73,7 +73,7 @@ async def list_active_workloads(
     user_id_filter = None if user.is_admin else api_key.user_id
     return await WorkloadService.list_workloads(
         db, page=page, per_page=per_page,
-        status="running,scheduled",  # Fix: include both running AND scheduled
+        status="running,scheduled",
         user_id=user_id_filter,
     )
 
@@ -131,51 +131,34 @@ async def workload_stats(
 
     - Regular users see only their own stats
     - Admins see platform-wide stats
+
+    Performance: Uses a single GROUP BY query instead of 4 separate queries.
     """
     user_id_filter = None if user.is_admin else api_key.user_id
 
-    # Base query with user scoping
-    base_query = select(func.count(Workload.id))
+    # Single optimized GROUP BY query (was 4 separate queries)
+    status_counts_query = (
+        select(Workload.status, func.count(Workload.id).label("count"))
+        .group_by(Workload.status)
+    )
     if user_id_filter:
-        base_query = base_query.where(Workload.user_id == user_id_filter)
+        status_counts_query = status_counts_query.where(Workload.user_id == user_id_filter)
 
-    # Total workloads
-    total_result = await db.execute(base_query)
-    total = total_result.scalar() or 0
+    result = await db.execute(status_counts_query)
+    rows = result.all()
 
-    # Active workloads (running + scheduled)
-    active_result = await db.execute(
-        select(func.count(Workload.id)).where(
-            Workload.status.in_(["running", "scheduled"]),
-            *([Workload.user_id == user_id_filter] if user_id_filter else []),
-        )
-    )
-    active = active_result.scalar() or 0
+    # Build counts from GROUP BY result
+    counts = {"total": 0, "active": 0, "completed": 0, "failed": 0}
+    for row in rows:
+        counts["total"] += row.count
+        if row.status in ("running", "scheduled"):
+            counts["active"] += row.count
+        elif row.status == "completed":
+            counts["completed"] = row.count
+        elif row.status == "failed":
+            counts["failed"] = row.count
 
-    # Completed workloads
-    completed_result = await db.execute(
-        select(func.count(Workload.id)).where(
-            Workload.status == "completed",
-            *([Workload.user_id == user_id_filter] if user_id_filter else []),
-        )
-    )
-    completed = completed_result.scalar() or 0
-
-    # Failed workloads
-    failed_result = await db.execute(
-        select(func.count(Workload.id)).where(
-            Workload.status == "failed",
-            *([Workload.user_id == user_id_filter] if user_id_filter else []),
-        )
-    )
-    failed = failed_result.scalar() or 0
-
-    return {
-        "total": total,
-        "active": active,
-        "completed": completed,
-        "failed": failed,
-    }
+    return counts
 
 
 @router.get("/{workload_id}", response_model=WorkloadResponse)
@@ -194,6 +177,7 @@ async def get_workload(
         raise not_found("workload", workload_id)
 
     # Authorization check: non-admin users can only see their own workloads
+    # Single DB query for user_id check (not fetching full Workload object)
     if not user.is_admin:
         wl = await db.execute(select(Workload.user_id).where(Workload.id == workload_id))
         wl_user_id = wl.scalar_one_or_none()
@@ -215,18 +199,19 @@ async def update_workload(
 
     Regular users can only update their own workloads.
     """
-    # Authorization check
-    if not user.is_admin:
-        wl = await db.execute(select(Workload).where(Workload.id == workload_id))
-        wl_obj = wl.scalar_one_or_none()
-        if not wl_obj:
-            raise not_found("workload", workload_id)
-        if wl_obj.user_id and wl_obj.user_id != api_key.user_id:
-            raise not_found("workload", workload_id)
-
     # Validate status if provided
     if data.status and data.status not in VALID_WORKLOAD_STATUSES:
         raise invalid_enum_value("status", data.status, VALID_WORKLOAD_STATUSES)
+
+    # Authorization check: non-admin users can only update their own workloads
+    # Only select user_id, not the full Workload object
+    if not user.is_admin:
+        wl = await db.execute(select(Workload.user_id).where(Workload.id == workload_id))
+        wl_user_id = wl.scalar_one_or_none()
+        if wl_user_id is None:
+            raise not_found("workload", workload_id)
+        if wl_user_id != api_key.user_id:
+            raise not_found("workload", workload_id)
 
     result = await WorkloadService.update_workload(db, workload_id, data)
     if not result:
@@ -273,13 +258,14 @@ async def delete_workload(
 
     Regular users can only delete their own workloads.
     """
-    # Authorization check
+    # Authorization check: non-admin users can only delete their own workloads
+    # Only select user_id, not the full Workload object
     if not user.is_admin:
-        wl = await db.execute(select(Workload).where(Workload.id == workload_id))
-        wl_obj = wl.scalar_one_or_none()
-        if not wl_obj:
+        wl = await db.execute(select(Workload.user_id).where(Workload.id == workload_id))
+        wl_user_id = wl.scalar_one_or_none()
+        if wl_user_id is None:
             raise not_found("workload", workload_id)
-        if wl_obj.user_id and wl_obj.user_id != api_key.user_id:
+        if wl_user_id != api_key.user_id:
             raise not_found("workload", workload_id)
 
     deleted = await WorkloadService.delete_workload(db, workload_id)

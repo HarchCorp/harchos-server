@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "HarchOS Server"
-    app_version: str = "0.5.0"
+    app_version: str = "0.7.0"
     debug: bool = False  # SAFE DEFAULT: debug off in production
     environment: str = "production"  # dev / staging / production
     log_level: str = "INFO"  # DEBUG / INFO / WARNING / ERROR / CRITICAL
@@ -64,7 +64,16 @@ class Settings(BaseSettings):
     carbon_static_fallback: bool = True  # Use static data when APIs unavailable
 
     # Rate limiting
-    rate_limit_requests_per_minute: int = 60
+    rate_limit_requests_per_minute: int = 60  # Default, overridden by tiered limits
+    rate_limit_free_rpm: int = 30
+    rate_limit_standard_rpm: int = 120
+    rate_limit_enterprise_rpm: int = 600
+    rate_limit_inference_free_rpm: int = 10
+    rate_limit_inference_standard_rpm: int = 60
+    rate_limit_inference_enterprise_rpm: int = 300
+    rate_limit_batch_free_rpm: int = 5
+    rate_limit_batch_standard_rpm: int = 20
+    rate_limit_batch_enterprise_rpm: int = 100
 
     # Redis caching (Upstash) — optional but recommended
     # Get free at: https://console.upstash.com
@@ -86,6 +95,26 @@ class Settings(BaseSettings):
     # Webhook configuration
     webhook_max_retries: int = 3
     webhook_timeout_seconds: int = 10
+
+    # Performance
+    max_request_size_bytes: int = 10 * 1024 * 1024  # 10MB
+    enable_response_compression: bool = True
+    enable_response_caching: bool = True
+
+    # Fine-tuning
+    fine_tuning_max_training_hours: int = 72  # Max fine-tuning job duration
+    fine_tuning_max_file_size_bytes: int = 500 * 1024 * 1024  # 500MB
+
+    # Batch inference
+    batch_max_items: int = 100  # Max items per batch
+    batch_concurrency: int = 10  # Max concurrent items processed
+    batch_retention_days: int = 7  # How long to keep batch results
+
+    # WebSocket
+    ws_heartbeat_interval_seconds: int = 30
+    ws_max_connections: int = 1000
+    ws_monitoring_interval_seconds: int = 5
+    ws_carbon_interval_seconds: int = 10
 
     @property
     def is_production(self) -> bool:

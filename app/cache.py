@@ -23,11 +23,16 @@ class InMemoryCache:
 
     Data is LOST on every deploy/restart — this is intentional as a
     fallback. For persistent caching, configure Upstash Redis.
+
+    Includes a maximum size limit to prevent unbounded memory growth.
+    When the limit is reached, the oldest entries are evicted first.
     """
+
+    MAX_ENTRIES = 10000  # Prevent unbounded memory growth
 
     def __init__(self):
         self._store: dict[str, tuple[Any, float]] = {}
-        logger.info("Cache: using in-memory fallback (data lost on restart)")
+        logger.info("Cache: using in-memory fallback (data lost on restart, max %d entries)", self.MAX_ENTRIES)
 
     async def get(self, key: str) -> Optional[str]:
         """Get a cached value by key. Returns None if expired or missing."""
@@ -41,8 +46,25 @@ class InMemoryCache:
         return value
 
     async def set(self, key: str, value: str, ttl_seconds: int = 1800) -> None:
-        """Set a cached value with TTL in seconds."""
-        self._store[key] = (value, time.time() + ttl_seconds)
+        """Set a cached value with TTL in seconds.
+
+        Evicts expired entries and oldest entries when MAX_ENTRIES is reached.
+        """
+        # Evict expired entries first
+        now = time.time()
+        expired_keys = [k for k, (_, exp) in self._store.items() if now > exp]
+        for k in expired_keys:
+            del self._store[k]
+
+        # If still at capacity, evict the oldest entries (smallest expiry time)
+        if len(self._store) >= self.MAX_ENTRIES:
+            # Sort by expiry time and remove the 10% oldest
+            sorted_keys = sorted(self._store.keys(), key=lambda k: self._store[k][1])
+            to_remove = sorted_keys[:max(1, len(sorted_keys) // 10)]
+            for k in to_remove:
+                del self._store[k]
+
+        self._store[key] = (value, now + ttl_seconds)
 
     async def delete(self, key: str) -> None:
         """Delete a cached key."""

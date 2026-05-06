@@ -3,6 +3,11 @@
 Supports both SQLite (local dev) and PostgreSQL (production/Supabase).
 When HARCHOS_DATABASE_URL starts with "postgresql", connection pooling is
 enabled with configurable pool size and recycling.
+
+Performance improvements:
+- No auto-commit on GET requests (avoids unnecessary commits)
+- Pool pre-ping for connection health
+- Proper pool recycling for long-running connections
 """
 
 import logging
@@ -65,12 +70,19 @@ class Base(DeclarativeBase):
 async def get_db() -> AsyncSession:  # type: ignore[misc]
     """Dependency that yields an async database session.
 
-    Automatically commits on success and rolls back on exception.
+    Automatically commits on success (for mutations) and rolls back on exception.
+    Only commits if the session has pending changes (avoids unnecessary commits
+    on GET requests that don't modify data).
     """
     async with async_session_factory() as session:
         try:
             yield session
-            await session.commit()
+            # Only commit if there are pending changes
+            # This avoids unnecessary commits on read-only GET requests
+            if session.in_transaction() and session.is_active:
+                # Check if any changes were made
+                if session.dirty or session.new or session.deleted:
+                    await session.commit()
         except Exception:
             await session.rollback()
             raise

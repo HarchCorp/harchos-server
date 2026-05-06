@@ -48,6 +48,14 @@ ERROR_CODES: dict[str, dict[str, Any]] = {
     "E0307": {"status": 404, "title": "Carbon Data Not Available", "doc": "/docs/errors/E0307"},
     "E0308": {"status": 409, "title": "Resource Already Exists", "doc": "/docs/errors/E0308"},
     "E0309": {"status": 409, "title": "Email Already Registered", "doc": "/docs/errors/E0309"},
+    "E0310": {"status": 404, "title": "Project Not Found", "doc": "/docs/errors/E0310"},
+    "E0311": {"status": 403, "title": "Project Access Denied", "doc": "/docs/errors/E0311"},
+    "E0312": {"status": 403, "title": "Insufficient Scope", "doc": "/docs/errors/E0312"},
+    "E0313": {"status": 429, "title": "Token Budget Exceeded", "doc": "/docs/errors/E0313"},
+    "E0314": {"status": 429, "title": "Spending Limit Exceeded", "doc": "/docs/errors/E0314"},
+    "E0315": {"status": 400, "title": "Model Not Allowed For Key", "doc": "/docs/errors/E0315"},
+    "E0316": {"status": 400, "title": "Region Not Allowed For Key", "doc": "/docs/errors/E0316"},
+    "E0317": {"status": 403, "title": "Project Inactive", "doc": "/docs/errors/E0317"},
 
     # Rate limiting (E04xx)
     "E0400": {"status": 429, "title": "Rate Limit Exceeded", "doc": "/docs/errors/E0400"},
@@ -60,6 +68,32 @@ ERROR_CODES: dict[str, dict[str, Any]] = {
     "E0502": {"status": 400, "title": "Inference Model Not Available", "doc": "/docs/errors/E0502"},
     "E0503": {"status": 429, "title": "Inference Capacity Exceeded", "doc": "/docs/errors/E0503"},
     "E0504": {"status": 400, "title": "Context Length Exceeded", "doc": "/docs/errors/E0504"},
+    "E0505": {"status": 400, "title": "Invalid Embedding Input", "doc": "/docs/errors/E0505"},
+    "E0506": {"status": 400, "title": "Batch Size Exceeded", "doc": "/docs/errors/E0506"},
+    "E0507": {"status": 400, "title": "Batch Item Error", "doc": "/docs/errors/E0507"},
+
+    # Fine-tuning errors (E06xx)
+    "E0600": {"status": 400, "title": "Fine-Tuning Job Error", "doc": "/docs/errors/E0600"},
+    "E0601": {"status": 400, "title": "Invalid Training Data Format", "doc": "/docs/errors/E0601"},
+    "E0602": {"status": 400, "title": "Training File Too Large", "doc": "/docs/errors/E0602"},
+    "E0603": {"status": 404, "title": "Fine-Tuning Job Not Found", "doc": "/docs/errors/E0603"},
+    "E0604": {"status": 400, "title": "Fine-Tuning Job Cannot Be Cancelled", "doc": "/docs/errors/E0604"},
+    "E0605": {"status": 400, "title": "Carbon Budget Exceeded During Training", "doc": "/docs/errors/E0605"},
+    "E0606": {"status": 404, "title": "Training File Not Found", "doc": "/docs/errors/E0606"},
+    "E0607": {"status": 400, "title": "Unsupported Base Model For Fine-Tuning", "doc": "/docs/errors/E0607"},
+
+    # WebSocket errors (E07xx)
+    "E0700": {"status": 400, "title": "WebSocket Error", "doc": "/docs/errors/E0700"},
+    "E0701": {"status": 401, "title": "WebSocket Authentication Required", "doc": "/docs/errors/E0701"},
+    "E0702": {"status": 429, "title": "WebSocket Connection Limit Exceeded", "doc": "/docs/errors/E0702"},
+
+    # Health subsystem errors (E08xx)
+    "E0800": {"status": 503, "title": "Service Not Ready", "doc": "/docs/errors/E0800"},
+    "E0801": {"status": 503, "title": "Startup Incomplete", "doc": "/docs/errors/E0801"},
+    "E0802": {"status": 503, "title": "Database Unhealthy", "doc": "/docs/errors/E0802"},
+    "E0803": {"status": 503, "title": "Cache Unhealthy", "doc": "/docs/errors/E0803"},
+    "E0804": {"status": 503, "title": "Inference Backend Unhealthy", "doc": "/docs/errors/E0804"},
+    "E0805": {"status": 503, "title": "Carbon API Unhealthy", "doc": "/docs/errors/E0805"},
 
     # Server errors (E1xxx)
     "E1000": {"status": 500, "title": "Internal Server Error", "doc": "/docs/errors/E1000"},
@@ -155,6 +189,7 @@ def not_found(resource_type: str, resource_id: str = "") -> HarchOSError:
     code_map = {
         "workload": "E0301", "hub": "E0302", "model": "E0303",
         "user": "E0304", "api_key": "E0305", "billing": "E0306",
+        "project": "E0310",
     }
     code = code_map.get(resource_type, "E0300")
     msg = f"{resource_type.capitalize()} not found" + (f": {resource_id}" if resource_id else "")
@@ -187,6 +222,38 @@ def carbon_budget_exceeded(budget_grams: float, actual_grams: float) -> HarchOSE
 
 def already_exists(resource_type: str, identifier: str) -> HarchOSError:
     return HarchOSError("E0308", detail=f"A {resource_type} with this {identifier} already exists.")
+
+
+def project_not_found(project_id: str) -> HarchOSError:
+    return HarchOSError("E0310", detail=f"Project not found: {project_id}", meta={"project_id": project_id})
+
+
+def project_access_denied(project_id: str) -> HarchOSError:
+    return HarchOSError("E0311", detail=f"You do not have access to project '{project_id}'.", meta={"project_id": project_id})
+
+
+def insufficient_scope(required_scope: str) -> HarchOSError:
+    return HarchOSError("E0312", detail=f"API key lacks required scope: {required_scope}", meta={"required_scope": required_scope})
+
+
+def token_budget_exceeded(used: int, limit: int) -> HarchOSError:
+    return HarchOSError("E0313", detail=f"Daily token budget exceeded: {used} used of {limit} limit.", meta={"tokens_used": used, "tokens_limit": limit})
+
+
+def spending_limit_exceeded(spent: float, limit: float) -> HarchOSError:
+    return HarchOSError("E0314", detail=f"Monthly spending limit exceeded: ${spent:.2f} spent of ${limit:.2f} limit.", meta={"spent_usd": spent, "limit_usd": limit})
+
+
+def model_not_allowed(model_id: str) -> HarchOSError:
+    return HarchOSError("E0315", detail=f"Model '{model_id}' is not allowed for this API key.", meta={"model_id": model_id})
+
+
+def region_not_allowed(region: str) -> HarchOSError:
+    return HarchOSError("E0316", detail=f"Region '{region}' is not allowed for this API key.", meta={"region": region})
+
+
+def project_inactive(project_id: str) -> HarchOSError:
+    return HarchOSError("E0317", detail=f"Project '{project_id}' is inactive. Reactivate it to use its API keys.", meta={"project_id": project_id})
 
 
 # ---------------------------------------------------------------------------

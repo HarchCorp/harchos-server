@@ -1,14 +1,19 @@
-"""Hubs endpoints."""
+"""Hubs endpoints with admin-only mutation operations.
+
+Security: Creating, updating, and deleting hubs requires admin role.
+Listing and reading hubs is public (auth optional).
+"""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.api_key import ApiKey
+from app.models.user import User
 from app.schemas.hub import HubCreate, HubUpdate, HubResponse, HubCapacity
 from app.schemas.common import PaginatedResponse
 from app.services.hub_service import HubService
-from app.api.deps import require_auth, get_current_api_key
+from app.api.deps import require_auth, require_admin, get_current_api_key, get_current_user
 from app.config import settings
 
 router = APIRouter()
@@ -34,9 +39,15 @@ async def list_hubs(
 async def create_hub(
     data: HubCreate,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(require_admin),  # Admin-only: hub creation is infrastructure management
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new hub."""
+    """Create a new hub. Requires admin role.
+
+    Hub creation is an infrastructure-level operation that should
+    only be performed by administrators. Regular users can view
+    hubs but cannot create, modify, or delete them.
+    """
     return await HubService.create_hub(db, data)
 
 
@@ -58,9 +69,10 @@ async def update_hub(
     hub_id: str,
     data: HubUpdate,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(require_admin),  # Admin-only: hub modification
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a hub."""
+    """Update a hub. Requires admin role."""
     result = await HubService.update_hub(db, hub_id, data)
     if not result:
         raise HTTPException(status_code=404, detail="Hub not found")
@@ -71,9 +83,10 @@ async def update_hub(
 async def delete_hub(
     hub_id: str,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(require_admin),  # Admin-only: hub deletion
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a hub."""
+    """Delete a hub. Requires admin role."""
     deleted = await HubService.delete_hub(db, hub_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Hub not found")
@@ -85,7 +98,7 @@ async def get_hub_capacity(
     api_key: ApiKey | None = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get capacity info for a specific hub."""
+    """Get capacity info for a specific hub. Public endpoint."""
     result = await HubService.get_hub_capacity(db, hub_id)
     if not result:
         raise HTTPException(status_code=404, detail="Hub not found")

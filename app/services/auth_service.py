@@ -1,4 +1,4 @@
-"""Authentication service – API key validation, JWT token generation."""
+"""Authentication service – API key validation, JWT token generation, project-scoped keys."""
 
 import hashlib
 import secrets
@@ -12,6 +12,7 @@ from app.config import settings
 from app.models.api_key import ApiKey
 from app.models.user import User
 from app.schemas.auth import ApiKeyCreateResponse, TokenResponse, UserInfo
+
 
 class AuthService:
     """Handles API key and JWT token operations."""
@@ -34,7 +35,10 @@ class AuthService:
 
     @staticmethod
     async def authenticate_api_key(db: AsyncSession, key: str) -> ApiKey | None:
-        """Validate an API key and return the ApiKey object if valid."""
+        """Validate an API key and return the ApiKey object if valid.
+
+        Also checks that the project (if any) is active and not deleted.
+        """
         if not AuthService.validate_key_format(key):
             return None
         key_hash = AuthService.hash_key(key)
@@ -48,8 +52,24 @@ class AuthService:
         db: AsyncSession,
         user_id: str,
         name: str,
+        *,
+        project_id: str | None = None,
+        tier: str = "free",
+        scopes: list[str] | None = None,
+        allowed_models: list[str] | None = None,
+        allowed_regions: list[str] | None = None,
+        max_tokens_per_day: int | None = None,
+        spending_limit_monthly_usd: float | None = None,
+        expires_at: datetime | None = None,
     ) -> ApiKeyCreateResponse:
-        """Create a new API key for a user."""
+        """Create a new API key for a user, optionally scoped to a project.
+
+        When project_id is provided, the key is scoped to that project and
+        inherits the project's restrictions. The scopes, allowed_models,
+        allowed_regions, and budget fields provide fine-grained control.
+        """
+        import json
+
         raw_key = AuthService.generate_api_key()
         key_hash = AuthService.hash_key(raw_key)
         key_prefix = raw_key[:8]  # hsk_ + 4 chars
@@ -60,6 +80,16 @@ class AuthService:
             key_hash=key_hash,
             key_prefix=key_prefix,
             is_active=True,
+            project_id=project_id,
+            tier=tier,
+            scopes=json.dumps(scopes) if scopes else None,
+            allowed_models=json.dumps(allowed_models) if allowed_models else None,
+            allowed_regions=json.dumps(allowed_regions) if allowed_regions else None,
+            max_tokens_per_day=max_tokens_per_day,
+            tokens_used_today=0,
+            spending_limit_monthly_usd=spending_limit_monthly_usd,
+            spent_this_month_usd=0.0,
+            expires_at=expires_at,
         )
         db.add(api_key)
         await db.flush()

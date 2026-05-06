@@ -1,14 +1,19 @@
-"""Models endpoints (ML models)."""
+"""Models endpoints (ML models) with admin-only mutation operations.
+
+Security: Creating, updating, and deleting models requires admin role.
+Listing models requires authentication. Model catalog is managed by admins.
+"""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.api_key import ApiKey
+from app.models.user import User
 from app.schemas.model import ModelCreate, ModelUpdate, ModelResponse
 from app.schemas.common import PaginatedResponse
 from app.services.model_service import ModelService
-from app.api.deps import require_auth
+from app.api.deps import require_auth, require_admin, get_current_user
 from app.config import settings
 
 router = APIRouter()
@@ -24,7 +29,7 @@ async def list_models(
     api_key: ApiKey = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
-    """List models with pagination."""
+    """List models with pagination. Requires authentication."""
     return await ModelService.list_models(
         db, page=page, per_page=per_page, framework=framework, status=status, hub_id=hub_id
     )
@@ -34,9 +39,14 @@ async def list_models(
 async def create_model(
     data: ModelCreate,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(require_admin),  # Admin-only: model catalog management
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new model."""
+    """Create a new model. Requires admin role.
+
+    Model catalog management is an infrastructure-level operation.
+    Only administrators can add, update, or remove models from the catalog.
+    """
     return await ModelService.create_model(db, data)
 
 
@@ -58,9 +68,10 @@ async def update_model(
     model_id: str,
     data: ModelUpdate,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(require_admin),  # Admin-only: model catalog management
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a model."""
+    """Update a model. Requires admin role."""
     result = await ModelService.update_model(db, model_id, data)
     if not result:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -71,9 +82,10 @@ async def update_model(
 async def delete_model(
     model_id: str,
     api_key: ApiKey = Depends(require_auth),
+    user: User = Depends(require_admin),  # Admin-only: model catalog management
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a model."""
+    """Delete a model. Requires admin role."""
     deleted = await ModelService.delete_model(db, model_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Model not found")
