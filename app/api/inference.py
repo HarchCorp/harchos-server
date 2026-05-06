@@ -28,11 +28,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.api_key import ApiKey
-from app.api.deps import require_auth
+from app.api.deps import require_auth, check_model_access, check_region_access, check_token_budget, check_spending_limit
 from app.config import settings
 from app.cache import get_cached_json, set_cached_json
 from app.core.exceptions import model_not_available, inference_timeout, HarchOSError
 from app.core.enums import CarbonPreference
+from app.api.monitoring import sanitize_error_detail
 
 logger = logging.getLogger("harchos.inference")
 router = APIRouter()
@@ -44,7 +45,7 @@ router = APIRouter()
 
 class ChatMessage(BaseModel):
     role: str = Field(..., description="system, user, or assistant")
-    content: str = Field(..., description="Message content")
+    content: str = Field(..., description="Message content", max_length=100000)
 
 
 class ChatCompletionRequest(BaseModel):
@@ -64,7 +65,7 @@ class ChatCompletionRequest(BaseModel):
 
 class CompletionRequest(BaseModel):
     model: str = Field("harchos-llama-3.3-70b", description="Model ID")
-    prompt: str = Field(..., description="Text prompt")
+    prompt: str = Field(..., description="Text prompt", max_length=100000)
     temperature: float = Field(0.7, ge=0, le=2)
     max_tokens: int | None = Field(None, ge=1, le=32768)
     top_p: float = Field(1.0, ge=0, le=1)
@@ -303,12 +304,46 @@ async def _proxy_to_backend(
 @router.get("/models", response_model=ModelListResponse)
 async def list_inference_models(
     api_key: ApiKey = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
 ):
     """List all available inference models.
 
     Returns model catalog with carbon intensity information.
     This endpoint is OpenAI-compatible with HarchOS extensions.
+
+    When a real inference backend is configured, models are fetched
+    from the backend. Otherwise, falls back to the local catalog.
     """
+    # Try to get models from the real backend first
+    backend_url = getattr(settings, "inference_backend_url", "")
+    if backend_url:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{backend_url.rstrip('/')}/models",
+                    headers={"Authorization": f"Bearer {settings.inference_backend_api_key}"},
+                )
+                if resp.status_code == 200:
+                    backend_data = resp.json()
+                    backend_models = backend_data.get("data", [])
+                    models = [
+                        ModelInfo(
+                            id=m.get("id", ""),
+                            created=m.get("created", 1700000000),
+                            owned_by="harchos",
+                            carbon_intensity_gco2_kwh=47.0,
+                            hub_region="Morocco",
+                            family="",
+                            parameter_count_b=0,
+                        )
+                        for m in backend_models
+                    ]
+                    return ModelListResponse(data=models)
+        except Exception:
+            pass  # Fall back to local catalog
+
+    # Local model catalog (fallback)
     models = [
         ModelInfo(
             id=m["id"],
@@ -345,6 +380,18 @@ async def chat_completions(
     model_ids = [m["id"] for m in HARCHOS_MODELS]
     if request.model not in model_ids:
         raise model_not_available(request.model)
+
+    # Enforce API key restrictions (model + region access)
+    await check_model_access(api_key, request.model)
+    await check_region_access(api_key, "MA")
+
+    # Estimate tokens for budget check
+    prompt_tokens_est = sum(_estimate_tokens(m.content) for m in request.messages)
+    completion_tokens_est = min(request.max_tokens or 150, 150)
+    await check_token_budget(api_key, prompt_tokens_est + completion_tokens_est)
+    # Check spending limit (estimate $0.002 per 1K tokens as rough cost)
+    estimated_cost = (prompt_tokens_est + completion_tokens_est) / 1000 * 0.002
+    await check_spending_limit(api_key, estimated_cost)
 
     # Get carbon data for the greenest hub
     from app.services.carbon_service import CarbonService
@@ -398,7 +445,7 @@ async def chat_completions(
 
     # --- Mock mode (no backend configured) ---
     if request.stream:
-        return await _stream_chat_completion(request, intensity, hub_region, gpu_type)
+        return await _stream_chat_completion(request, intensity, hub_region, gpu_type, is_mock=True)
 
     # Non-streaming mock response
     prompt_tokens = sum(_estimate_tokens(m.content) for m in request.messages)
@@ -425,23 +472,32 @@ async def chat_completions(
         f"No other AI platform gives you this level of carbon transparency."
     )
 
-    return ChatCompletionResponse(
-        id=_generate_response_id(),
-        created=int(time.time()),
-        model=request.model,
-        choices=[
-            ChatCompletionChoice(
-                index=0,
-                message=ChatMessage(role="assistant", content=response_text),
-                finish_reason="stop",
-            )
-        ],
-        usage=UsageInfo(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-        ),
-        carbon_footprint=carbon,
+    return JSONResponse(
+        content=ChatCompletionResponse(
+            id=_generate_response_id(),
+            created=int(time.time()),
+            model=request.model,
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=response_text),
+                    finish_reason="stop",
+                )
+            ],
+            usage=UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+            carbon_footprint=carbon,
+        ).model_dump(),
+        headers={
+            "X-HarchOS-Mode": "mock",
+            "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
+            "X-Carbon-Intensity": str(intensity.carbon_intensity_gco2_kwh),
+            "X-Renewable-Percentage": str(intensity.renewable_percentage),
+            "X-Carbon-Saved-vs-Avg-gCO2": str(carbon.carbon_saved_vs_average_gco2),
+        },
     )
 
 
@@ -453,6 +509,16 @@ async def completions(
 ):
     """Create a text completion — OpenAI-compatible with carbon tracking."""
     start_time = time.time()
+
+    # Enforce API key restrictions
+    await check_model_access(api_key, request.model)
+    await check_region_access(api_key, "MA")
+
+    prompt_tokens_est = _estimate_tokens(request.prompt)
+    completion_tokens_est = min(request.max_tokens or 100, 100)
+    await check_token_budget(api_key, prompt_tokens_est + completion_tokens_est)
+    estimated_cost = (prompt_tokens_est + completion_tokens_est) / 1000 * 0.002
+    await check_spending_limit(api_key, estimated_cost)
 
     from app.services.carbon_service import CarbonService
     intensity = await CarbonService.get_zone_intensity(db, "MA")
@@ -472,23 +538,29 @@ async def completions(
     )
     carbon.inference_duration_seconds = round(elapsed, 3)
 
-    return CompletionResponse(
-        id=_generate_response_id(),
-        created=int(time.time()),
-        model=request.model,
-        choices=[
-            CompletionChoice(
-                index=0,
-                text=f"[HarchOS Carbon-Aware Inference] Processed on {intensity.renewable_percentage:.0f}% renewable energy. CO2: {carbon.gco2_per_request:.4f}g. Saved vs avg: {carbon.carbon_saved_vs_average_gco2:.4f}g.",
-                finish_reason="stop",
-            )
-        ],
-        usage=UsageInfo(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-        ),
-        carbon_footprint=carbon,
+    return JSONResponse(
+        content=CompletionResponse(
+            id=_generate_response_id(),
+            created=int(time.time()),
+            model=request.model,
+            choices=[
+                CompletionChoice(
+                    index=0,
+                    text=f"[HarchOS Carbon-Aware Inference] Processed on {intensity.renewable_percentage:.0f}% renewable energy. CO2: {carbon.gco2_per_request:.4f}g. Saved vs avg: {carbon.carbon_saved_vs_average_gco2:.4f}g.",
+                    finish_reason="stop",
+                )
+            ],
+            usage=UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+            carbon_footprint=carbon,
+        ).model_dump(),
+        headers={
+            "X-HarchOS-Mode": "mock",
+            "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
+        },
     )
 
 
@@ -501,6 +573,7 @@ async def _stream_chat_completion(
     intensity,
     hub_region: str,
     gpu_type: str,
+    is_mock: bool = False,
 ) -> StreamingResponse:
     """Stream a chat completion via SSE (Server-Sent Events) — OpenAI-compatible."""
 
@@ -564,6 +637,8 @@ async def _stream_chat_completion(
         yield f"data: {json.dumps(final_chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
+    mock_header = {"X-HarchOS-Mode": "mock"} if is_mock else {}
+
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
@@ -574,6 +649,7 @@ async def _stream_chat_completion(
             "X-Carbon-Intensity": str(intensity.carbon_intensity_gco2_kwh),
             "X-Renewable-Percentage": str(intensity.renewable_percentage),
             "X-Carbon-Saved-vs-Avg-gCO2": str(carbon.carbon_saved_vs_average_gco2),
+            **mock_header,
         },
     )
 

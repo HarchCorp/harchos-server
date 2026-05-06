@@ -778,5 +778,6 @@ async def create_embeddings(
             "X-Embedding-Model": request.model,
             "X-Embedding-Dimensions": str(effective_dimensions),
             "X-Cache": "MISS",
+            "X-HarchOS-Mode": "mock",
         },
     )

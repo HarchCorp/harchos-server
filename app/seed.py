@@ -247,7 +247,7 @@ async def seed():
         # Check if already seeded
         result = await session.execute(select(User).limit(1))
         if result.scalar_one_or_none():
-            print("Database already seeded. Skipping.")
+            logger.info("Database already seeded. Skipping.")
             return
 
         # Create default user
@@ -274,7 +274,7 @@ async def seed():
         session.add(api_key)
         await session.flush()
 
-        print(f"Created default user: {user.email}")
+        logger.info("Created default user: %s", user.email)
         logger.info("Created test API key: %s***", test_key[:8])
 
         # Create optimized Moroccan hubs
@@ -283,12 +283,12 @@ async def seed():
             session.add(hub)
 
         await session.flush()
-        print(f"Seeded {len(MOROCCAN_HUBS)} Moroccan hubs:")
+        logger.info("Seeded %d Moroccan hubs:", len(MOROCCAN_HUBS))
         total_gpus = 0
         for hub_data in MOROCCAN_HUBS:
             total_gpus += hub_data["total_gpus"]
-            print(f"  - {hub_data['name']} ({hub_data['city']}): {hub_data['total_gpus']} GPUs, {hub_data['renewable_percentage']}% renewable, {hub_data['grid_carbon_intensity']} gCO2/kWh")
-        print(f"  Total: {total_gpus} GPUs across {len(MOROCCAN_HUBS)} hubs")
+            logger.info("  - %s (%s): %d GPUs, %.1f%% renewable, %.0f gCO2/kWh", hub_data['name'], hub_data['city'], hub_data['total_gpus'], hub_data['renewable_percentage'], hub_data['grid_carbon_intensity'])
+        logger.info("  Total: %d GPUs across %d hubs", total_gpus, len(MOROCCAN_HUBS))
 
         # Create pricing plans
         for plan_data in PRICING_PLANS:
@@ -340,11 +340,11 @@ async def seed():
             logger.info("Seeded %d AI models", len(ai_models))
 
         await session.commit()
-        print(f"\nSeeded {len(PRICING_PLANS)} pricing plans:")
+        logger.info("Seeded %d pricing plans:", len(PRICING_PLANS))
         for plan_data in PRICING_PLANS:
-            print(f"  - {plan_data['name']} ({plan_data['currency']}): ${plan_data['price_per_gpu_hour']}/gpu-hr in {plan_data['region']}")
+            logger.info("  - %s (%s): $%.2f/gpu-hr in %s", plan_data['name'], plan_data['currency'], plan_data['price_per_gpu_hour'], plan_data['region'])
 
-        print("\nSeed complete!")
+        logger.info("Seed complete!")
 
 
 if __name__ == "__main__":

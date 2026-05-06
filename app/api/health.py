@@ -49,23 +49,25 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# Startup tracking — set to True once lifespan startup completes
+# Startup tracking — delegates to app.main.is_startup_complete (single source of truth)
 # ---------------------------------------------------------------------------
 
 _start_time: float = time.time()
-_startup_complete: bool = False
 
 
-def mark_startup_complete() -> None:
-    """Called by the application lifespan after DB init + seed."""
-    global _startup_complete
-    _startup_complete = True
-    logger.info("Health: startup probe marked as COMPLETE")
+def _is_startup_complete() -> bool:
+    """Check whether the application has finished initialising.
 
-
-def is_startup_complete() -> bool:
-    """Check whether the application has finished initialising."""
-    return _startup_complete
+    Imports from app.main to use the canonical startup flag that is
+    set by the lifespan context manager. Previously this module had
+    its own _startup_complete that was never set, causing the
+    /health/startup probe to always return 503.
+    """
+    try:
+        from app.main import is_startup_complete
+        return is_startup_complete()
+    except ImportError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +382,7 @@ async def liveness_probe():
         Replicate   GET /ping
     """
     return HealthResponse(
-        status="alive",
+        status="healthy",
         version=settings.app_version,
         environment=settings.environment,
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -528,7 +530,7 @@ async def detailed_health_probe():
         "platform_release": platform.release(),
         "cpu_count": os.cpu_count(),
         "pid": os.getpid(),
-        "startup_complete": _startup_complete,
+        "startup_complete": _is_startup_complete(),
         "database_type": "postgresql" if settings.database_url.startswith("postgresql") else "sqlite",
         "inference_backend_configured": bool(getattr(settings, "inference_backend_url", "")),
         "carbon_api_configured": bool(settings.electricity_maps_api_key),
@@ -578,8 +580,8 @@ async def startup_probe(response: Response):
 
     # Check 1: Is the startup flag set?
     checks["startup_flag"] = {
-        "status": "passed" if _startup_complete else "pending",
-        "detail": "Application lifespan completed" if _startup_complete else "Waiting for lifespan startup to finish",
+        "status": "passed" if _is_startup_complete() else "pending",
+        "detail": "Application lifespan completed" if _is_startup_complete() else "Waiting for lifespan startup to finish",
     }
 
     # Check 2: Can we query the database? (tables must exist)
@@ -649,7 +651,7 @@ async def startup_probe(response: Response):
         }
 
     # Overall startup status
-    all_ready = _startup_complete and db_ready and seed_loaded
+    all_ready = _is_startup_complete() and db_ready and seed_loaded
 
     if all_ready:
         return {

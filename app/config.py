@@ -37,9 +37,13 @@ class Settings(BaseSettings):
     # IMPORTANT: In production, ALWAYS set HARCHOS_SECRET_KEY to a random 64+ char string
     # Generate with: python -c "import secrets; print(secrets.token_urlsafe(64))"
     secret_key: str = ""  # Empty = will fail to start in production (safe default)
-    api_key_prefix: str = "hsk_"
+    api_key_prefix: str = "hsk_"  # 4+ char prefix to prevent enumeration
     token_prefix: str = "hst_"
     access_token_expire_minutes: int = 60 * 24  # 24 hours
+
+    # Trusted proxy IPs — X-Forwarded-For is only accepted from these IPs
+    # Set HARCHOS_TRUSTED_PROXIES='["10.0.0.1","10.0.0.2"]' for your load balancer
+    trusted_proxies: list[str] = []  # Empty = never trust X-Forwarded-For
 
     # CORS — restrictive by default
     cors_origins: list[str] = []  # Empty = no CORS in production by default

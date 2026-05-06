@@ -39,7 +39,7 @@ api_router.include_router(pricing_router, prefix="/pricing", tags=["Pricing"])
 api_router.include_router(regions_router, prefix="/regions", tags=["Regions"])
 api_router.include_router(monitoring_router, prefix="/monitoring", tags=["Monitoring"])
 api_router.include_router(inference_router, prefix="/inference", tags=["Inference"])
-api_router.include_router(metrics_router, tags=["Metrics"])
+api_router.include_router(metrics_router, prefix="/metrics", tags=["Metrics"])
 api_router.include_router(webhooks_router, prefix="/webhooks", tags=["Webhooks"])
 
 # 10x endpoints — features no single competitor has all of
@@ -49,4 +49,4 @@ api_router.include_router(fine_tuning_router, prefix="/fine-tuning", tags=["Fine
 api_router.include_router(model_health_router, tags=["Model Health"])
 
 # Project-scoped API keys
-api_router.include_router(projects_router, prefix="/v1/projects", tags=["Projects"])
+api_router.include_router(projects_router, prefix="/projects", tags=["Projects"])

@@ -211,10 +211,18 @@ async def register(
     if settings.is_production:
         raise HarchOSError("E0105", detail="Public registration is disabled in production. Contact admin@harchos.ai for access.")
 
-    # Validate role
+    # Validate role — ALWAYS reject admin role, even in dev
     valid_roles = [r.value for r in UserRole]
     if data.role not in valid_roles:
         raise HarchOSError("E0201", detail=f"Invalid role '{data.role}'. Allowed: {', '.join(valid_roles)}", meta={"allowed": valid_roles})
+
+    # SECURITY: Never allow admin role via public registration, even in dev
+    if data.role == "admin":
+        raise HarchOSError(
+            "E0201",
+            detail="Admin role cannot be assigned via registration. Use the admin panel or CLI.",
+            meta={"requested_role": "admin", "allowed_via_register": ["user", "viewer"]},
+        )
 
     # Check if email already exists
     existing = await db.execute(select(User).where(User.email == data.email))

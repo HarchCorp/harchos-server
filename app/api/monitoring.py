@@ -16,8 +16,10 @@ from app.database import get_db
 from app.models.hub import Hub
 from app.models.workload import Workload
 from app.models.carbon import CarbonOptimizationLog
+from app.models.api_key import ApiKey
 from app.config import settings
 from app.cache import cache
+from app.api.deps import require_auth
 
 router = APIRouter()
 
@@ -72,6 +74,7 @@ class DetailedHealth(BaseModel):
 
 @router.get("/metrics", response_model=PlatformMetrics)
 async def get_platform_metrics(
+    api_key: ApiKey = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
     """Get platform-wide aggregate metrics.
@@ -144,6 +147,7 @@ async def get_platform_metrics(
 
 @router.get("/health/detailed", response_model=DetailedHealth)
 async def detailed_health_check(
+    api_key: ApiKey = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
     """Detailed health check with system information.
@@ -199,3 +203,23 @@ async def detailed_health_check(
         carbon_api_configured=bool(settings.electricity_maps_api_key),
         timestamp=datetime.now(timezone.utc),
     )
+
+
+# ---------------------------------------------------------------------------
+# Sanitize error details — prevent backend URL/key leakage
+# ---------------------------------------------------------------------------
+
+def sanitize_error_detail(detail: str) -> str:
+    """Remove URLs, API keys, and internal paths from error messages.
+
+    Prevents information leakage when backend errors are returned to
+    the client. Logs the original error server-side.
+    """
+    import re
+    # Remove URLs
+    sanitized = re.sub(r'https?://[^\s]+', '[REDACTED_URL]', detail)
+    # Remove API key patterns
+    sanitized = re.sub(r'(api[_-]?key|token|secret|bearer)\s*[:=]\s*\S+', r'\1=[REDACTED]', sanitized, flags=re.IGNORECASE)
+    # Remove file paths
+    sanitized = re.sub(r'/[a-zA-Z0-9_/.-]+\.py', '[REDACTED_PATH]', sanitized)
+    return sanitized

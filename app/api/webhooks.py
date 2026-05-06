@@ -144,7 +144,7 @@ class WebhookResponse(BaseModel):
     id: str
     url: str
     events: list[str]
-    secret: str
+    secret: str | None = Field(None, description="Webhook signing secret (only shown at creation)")
     is_active: bool
     created_at: datetime
 
@@ -232,7 +232,7 @@ async def list_webhooks(
             id=w.id,
             url=w.url,
             events=json.loads(w.events),
-            secret=w.secret,
+            secret=None,  # Never expose secrets in list endpoint
             is_active=w.is_active,
             created_at=w.created_at,
         )

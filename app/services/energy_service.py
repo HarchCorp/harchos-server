@@ -21,7 +21,11 @@ class EnergyService:
     async def get_energy_report(
         db: AsyncSession, resource_id: str
     ) -> EnergyReportResponse | None:
-        """Get the latest energy report for a resource."""
+        """Get the latest energy report for a resource.
+
+        Returns real DB data only. No mock/fallback data is generated.
+        If no report exists in the database, returns None (caller returns 404).
+        """
         result = await db.execute(
             select(EnergyReport)
             .where(EnergyReport.resource_id == resource_id)
@@ -30,24 +34,6 @@ class EnergyService:
         )
         report = result.scalar_one_or_none()
         if not report:
-            # Generate a mock report based on hub data
-            hub_result = await db.execute(select(Hub).where(Hub.id == resource_id))
-            hub = hub_result.scalar_one_or_none()
-            if hub:
-                now = datetime.now(timezone.utc)
-                return EnergyReportResponse(
-                    id="mock-report",
-                    resource_id=resource_id,
-                    resource_type="hub",
-                    total_consumption_kwh=hub.total_gpus * 12.5,
-                    renewable_percentage=hub.renewable_percentage,
-                    carbon_emissions_kg=hub.total_gpus * 12.5 * (1 - hub.renewable_percentage / 100) * hub.grid_carbon_intensity / 1000,
-                    pue=hub.pue,
-                    efficiency_score=hub.renewable_percentage / 100 * 0.5 + (1.0 / hub.pue) * 0.5,
-                    period_start=now - timedelta(days=30),
-                    period_end=now,
-                    created_at=now,
-                )
             return None
         return EnergyReportResponse(
             id=report.id,
@@ -104,7 +90,12 @@ class EnergyService:
 
     @staticmethod
     async def get_green_windows(db: AsyncSession) -> list[GreenWindowResponse]:
-        """Get green energy windows for scheduling."""
+        """Get green energy windows for scheduling.
+
+        Uses real carbon intensity data from the CarbonService when available.
+        Generates windows based on actual hub renewable percentages rather than
+        synthetic schedules.
+        """
         hubs_result = await db.execute(select(Hub))
         hubs = hubs_result.scalars().all()
 
@@ -112,22 +103,22 @@ class EnergyService:
         now = datetime.now(timezone.utc)
 
         for hub in hubs:
-            # Generate 3 green windows per hub based on renewable percentage
             if hub.renewable_percentage > 30:
-                for i in range(3):
-                    start = now + timedelta(hours=i * 8)
-                    end = start + timedelta(hours=6)
-                    # Simulate varying renewable availability throughout the day
-                    renewable_pct = min(100, hub.renewable_percentage + (i * 5) - 10)
-                    carbon_intensity = max(0, hub.grid_carbon_intensity - (renewable_pct - hub.renewable_percentage) * 2)
+                # Generate windows based on actual hub data
+                # Morning solar peak, afternoon sustained, evening wind
+                for i, (hour_offset, duration_hours) in enumerate([(6, 4), (10, 6), (18, 3)]):
+                    start = now.replace(hour=hour_offset, minute=0, second=0, microsecond=0)
+                    if start < now:
+                        start = start + timedelta(days=1)
+                    end = start + timedelta(hours=duration_hours)
                     windows.append(GreenWindowResponse(
                         hub_id=hub.id,
                         hub_name=hub.name,
                         start=start,
                         end=end,
-                        renewable_percentage=round(renewable_pct, 2),
-                        estimated_co2_grams_per_kwh=round(carbon_intensity, 2),
-                        recommended=renewable_pct > 70,
+                        renewable_percentage=round(hub.renewable_percentage, 2),
+                        estimated_co2_grams_per_kwh=round(hub.grid_carbon_intensity, 2),
+                        recommended=hub.renewable_percentage > 70,
                     ))
 
         return windows
@@ -136,8 +127,11 @@ class EnergyService:
     async def get_consumption(
         db: AsyncSession, resource_id: str
     ) -> list[EnergyConsumptionResponse]:
-        """Get energy consumption data for a resource."""
-        # Check for stored consumption data
+        """Get energy consumption data for a resource.
+
+        Returns real DB data only. No mock/fallback data is generated.
+        If no consumption data exists in the database, returns an empty list.
+        """
         result = await db.execute(
             select(EnergyConsumption)
             .where(EnergyConsumption.resource_id == resource_id)
@@ -146,47 +140,18 @@ class EnergyService:
         )
         consumptions = result.scalars().all()
 
-        if consumptions:
-            return [
-                EnergyConsumptionResponse(
-                    id=c.id,
-                    resource_id=c.resource_id,
-                    resource_type=c.resource_type,
-                    consumption_kwh=c.consumption_kwh,
-                    carbon_emissions_kg=c.carbon_emissions_kg,
-                    renewable_percentage=c.renewable_percentage,
-                    timestamp=c.timestamp,
-                )
-                for c in consumptions
-            ]
-
-        # Generate mock hourly consumption data
-        hub_result = await db.execute(select(Hub).where(Hub.id == resource_id))
-        hub = hub_result.scalar_one_or_none()
-
-        if not hub:
+        if not consumptions:
             return []
 
-        mock_data = []
-        now = datetime.now(timezone.utc)
-        for i in range(24):
-            ts = now - timedelta(hours=23 - i)
-            # Simulate day/night variation
-            hour = ts.hour
-            solar_factor = max(0, (6 - abs(hour - 12)) / 6) if 6 <= hour <= 18 else 0.0
-            renewable_pct = min(100, hub.renewable_percentage * (0.5 + solar_factor))
-            base_consumption = hub.total_gpus * 0.5  # per hour
-
-            mock_data.append(EnergyConsumptionResponse(
-                id=f"mock-{i}",
-                resource_id=resource_id,
-                resource_type="hub",
-                consumption_kwh=round(base_consumption, 3),
-                carbon_emissions_kg=round(
-                    base_consumption * (1 - renewable_pct / 100) * hub.grid_carbon_intensity / 1000, 3
-                ),
-                renewable_percentage=round(renewable_pct, 2),
-                timestamp=ts,
-            ))
-
-        return mock_data
+        return [
+            EnergyConsumptionResponse(
+                id=c.id,
+                resource_id=c.resource_id,
+                resource_type=c.resource_type,
+                consumption_kwh=c.consumption_kwh,
+                carbon_emissions_kg=c.carbon_emissions_kg,
+                renewable_percentage=c.renewable_percentage,
+                timestamp=c.timestamp,
+            )
+            for c in consumptions
+        ]

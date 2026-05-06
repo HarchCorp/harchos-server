@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.api_key import ApiKey
-from app.api.deps import require_auth
+from app.api.deps import require_auth, check_model_access, check_region_access, check_token_budget, check_spending_limit
 from app.config import settings
 from app.core.exceptions import model_not_available, inference_timeout, HarchOSError
 
@@ -58,7 +58,7 @@ router = APIRouter()
 class OpenAIChatMessage(BaseModel):
     """OpenAI chat message format."""
     role: str = Field(..., description="system, user, assistant, or tool")
-    content: str | list = Field(..., description="Message content or content parts")
+    content: str | list = Field(..., description="Message content or content parts", max_length=100000)
     name: str | None = Field(None, description="Participant name")
     tool_calls: list | None = Field(None, description="Tool calls (assistant messages)")
     tool_call_id: str | None = Field(None, description="Tool call ID (tool messages)")
@@ -233,6 +233,17 @@ async def chat_completions(
     if request.model not in model_ids:
         raise model_not_available(request.model)
 
+    # Enforce API key restrictions (model + region access)
+    await check_model_access(api_key, request.model)
+    await check_region_access(api_key, "MA")
+
+    # Budget enforcement
+    prompt_tokens_est = sum(_estimate_tokens(str(m.content)) for m in request.messages if m.content)
+    completion_tokens_est = min(request.max_tokens or request.max_completion_tokens or 150, 150)
+    await check_token_budget(api_key, prompt_tokens_est + completion_tokens_est)
+    estimated_cost = (prompt_tokens_est + completion_tokens_est) / 1000 * 0.002
+    await check_spending_limit(api_key, estimated_cost)
+
     # Get carbon data
     from app.services.carbon_service import CarbonService
     intensity = await CarbonService.get_zone_intensity(db, "MA")
@@ -370,7 +381,7 @@ async def chat_completions(
         return StreamingResponse(
             mock_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request)},
+            headers={"Cache-Control": "no-cache", "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request), "X-HarchOS-Mode": "mock"},
         )
 
     # Non-streaming mock
@@ -403,6 +414,7 @@ async def chat_completions(
             "X-Carbon-Intensity": str(ci),
             "X-Renewable-Percentage": str(renewable),
             "X-Carbon-Saved-vs-Avg-gCO2": str(carbon.carbon_saved_vs_average_gco2),
+            "X-HarchOS-Mode": "mock",
         },
     )
 
@@ -451,6 +463,7 @@ async def completions(
     return JSONResponse(content=response, headers={
         "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
         "X-Carbon-Intensity": str(intensity.carbon_intensity_gco2_kwh),
+        "X-HarchOS-Mode": "mock",
     })
 
 
@@ -504,4 +517,5 @@ async def embeddings(
 
     return JSONResponse(content=response, headers={
         "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
+        "X-HarchOS-Mode": "mock",
     })

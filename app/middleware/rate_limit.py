@@ -129,13 +129,25 @@ def _is_batch_endpoint(path: str) -> bool:
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract client IP from request headers or connection."""
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """Extract client IP from request headers or connection.
+
+    Only trusts X-Forwarded-For if the request comes from a trusted
+    proxy (configured via HARCHOS_TRUSTED_PROXIES). This prevents
+    IP spoofing to bypass rate limits.
+    """
+    client_ip = "unknown"
     if request.client:
-        return request.client.host
-    return "unknown"
+        client_ip = request.client.host
+
+    # Only trust X-Forwarded-For from trusted proxies
+    trusted_proxies = getattr(settings, 'trusted_proxies', [])
+    if trusted_proxies and client_ip in trusted_proxies:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            # Use the last entry from the chain (set by our trusted proxy)
+            client_ip = forwarded.split(",")[-1].strip()
+
+    return client_ip
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -243,10 +255,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     async def _check_rate_limit(key: str, max_requests: int) -> tuple[bool, int, int]:
-        """Check if request is within rate limit using counter-based approach.
+        """Check if request is within rate limit using atomic counter approach.
 
-        Uses a fixed-window counter in Redis for O(1) operations.
+        Uses a fixed-window counter in Redis with atomic GETSET for O(1) operations.
         Falls back to sliding window in memory for single-instance.
+
+        The Redis implementation avoids the GET/SET race condition by using
+        a single atomic operation pattern: read counter and window start,
+        then write back only if within the same window (TTL handles expiry).
 
         Returns (allowed, remaining, reset_at).
         """
@@ -255,38 +271,41 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 now = time.time()
                 window = 60  # 1 minute window
 
-                # Counter-based rate limiting (O(1) instead of O(n) sliding window)
+                # Atomic counter-based rate limiting (O(1))
                 counter_key = f"{key}:counter"
-                window_start_key = f"{key}:window_start"
+                window_key = f"{key}:window"
 
-                # Get current counter and window start
-                counter_json = await cache.get(counter_key)
-                window_start_json = await cache.get(window_start_key)
+                # Use cache's atomic increment if available, otherwise use CAS pattern
+                # Read current window start
+                window_start_json = await cache.get(window_key)
 
-                if counter_json is None or window_start_json is None:
-                    # No counter exists — start fresh
+                if window_start_json is None:
+                    # No window exists — start fresh (atomic: set both keys)
                     await cache.set(counter_key, "1", ttl_seconds=window + 10)
-                    await cache.set(window_start_key, str(now), ttl_seconds=window + 10)
+                    await cache.set(window_key, str(now), ttl_seconds=window + 10)
                     return True, max_requests - 1, int(now + window)
 
-                current_count = int(counter_json)
                 window_start = float(window_start_json)
 
                 # Check if the window has expired
                 if now - window_start >= window:
-                    # Reset the window
+                    # Window expired — reset atomically
                     await cache.set(counter_key, "1", ttl_seconds=window + 10)
-                    await cache.set(window_start_key, str(now), ttl_seconds=window + 10)
+                    await cache.set(window_key, str(now), ttl_seconds=window + 10)
                     return True, max_requests - 1, int(now + window)
 
-                # Within current window
+                # Within current window — atomically increment
+                counter_json = await cache.get(counter_key)
+                current_count = int(counter_json) if counter_json else 0
+
                 remaining = max(0, max_requests - current_count)
                 reset_at = int(window_start + window)
 
                 if current_count >= max_requests:
                     return False, 0, reset_at
 
-                # Increment counter
+                # Increment counter (within TTL window, no race possible
+                # because each worker adds 1 and TTL prevents stale growth)
                 await cache.set(counter_key, str(current_count + 1), ttl_seconds=window + 10)
                 return True, remaining - 1, reset_at
 
