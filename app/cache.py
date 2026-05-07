@@ -1,9 +1,11 @@
-"""Redis caching layer using Upstash Redis (REST API) or in-memory fallback.
+"""Redis caching layer using Upstash Redis (REST API), traditional Redis, or in-memory fallback.
 
 When HARCHOS_UPSTASH_REDIS_URL and HARCHOS_UPSTASH_REDIS_TOKEN are set,
 caching uses Upstash Redis via the REST API (no TCP connection needed,
-perfect for serverless/Railway). Otherwise, falls back to an in-memory
-TTL cache that resets on each deploy.
+perfect for serverless/Railway). When HARCHOS_REDIS_URL is set, caching
+uses a traditional Redis instance via redis.asyncio (TCP connection with
+connection pooling). Otherwise, falls back to an in-memory TTL cache that
+resets on each deploy.
 """
 
 from __future__ import annotations
@@ -167,8 +169,89 @@ class UpstashRedisCache:
             return 0
 
 
+class TraditionalRedisCache:
+    """Redis cache using redis.asyncio for traditional Redis instances.
+
+    Used when HARCHOS_REDIS_URL is set (e.g., redis://localhost:6379/0).
+    Supports connection pooling and automatic reconnection.
+    """
+
+    def __init__(self, url: str):
+        try:
+            import redis.asyncio as aioredis
+            self._redis = aioredis.from_url(
+                url,
+                decode_responses=True,
+                max_connections=20,
+                socket_timeout=5.0,
+                socket_connect_timeout=5.0,
+                retry_on_timeout=True,
+            )
+            self._available = True
+            logger.info("Cache: using traditional Redis (%s)", url.split("@")[-1] if "@" in url else url.split("//")[-1])
+        except ImportError:
+            logger.warning("redis package not installed, falling back to in-memory cache")
+            self._available = False
+            self._redis = None
+        except Exception as exc:
+            logger.warning("Traditional Redis init failed: %s, falling back", exc)
+            self._available = False
+            self._redis = None
+
+    async def get(self, key: str) -> Optional[str]:
+        if not self._available or not self._redis:
+            return None
+        try:
+            return await self._redis.get(key)
+        except Exception as exc:
+            logger.warning("Redis GET error for key %s: %s", key, exc)
+            return None
+
+    async def set(self, key: str, value: str, ttl_seconds: int = 1800) -> None:
+        if not self._available or not self._redis:
+            return
+        try:
+            await self._redis.set(key, value, ex=ttl_seconds)
+        except Exception as exc:
+            logger.warning("Redis SET error for key %s: %s", key, exc)
+
+    async def delete(self, key: str) -> None:
+        if not self._available or not self._redis:
+            return
+        try:
+            await self._redis.delete(key)
+        except Exception as exc:
+            logger.warning("Redis DELETE error for key %s: %s", key, exc)
+
+    async def exists(self, key: str) -> bool:
+        if not self._available or not self._redis:
+            return False
+        try:
+            return bool(await self._redis.exists(key))
+        except Exception as exc:
+            logger.warning("Redis EXISTS error for key %s: %s", key, exc)
+            return False
+
+    def is_available(self) -> bool:
+        return self._available
+
+    async def clear_pattern(self, prefix: str) -> int:
+        if not self._available or not self._redis:
+            return 0
+        try:
+            keys = []
+            async for key in self._redis.scan_iter(match=f"{prefix}*"):
+                keys.append(key)
+            if keys:
+                return await self._redis.delete(*keys)
+            return 0
+        except Exception as exc:
+            logger.warning("Redis clear_pattern error: %s", exc)
+            return 0
+
+
 # ---------------------------------------------------------------------------
-# Global cache instance — auto-detects Upstash vs in-memory
+# Global cache instance — auto-detects Upstash, traditional Redis, or in-memory
 # ---------------------------------------------------------------------------
 
 def _create_cache():
@@ -178,6 +261,8 @@ def _create_cache():
             url=settings.upstash_redis_url,
             token=settings.upstash_redis_token,
         )
+    if settings.redis_url:
+        return TraditionalRedisCache(url=settings.redis_url)
     return InMemoryCache()
 
 

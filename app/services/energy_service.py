@@ -92,10 +92,12 @@ class EnergyService:
     async def get_green_windows(db: AsyncSession) -> list[GreenWindowResponse]:
         """Get green energy windows for scheduling.
 
-        Uses real carbon intensity data from the CarbonService when available.
-        Generates windows based on actual hub renewable percentages rather than
-        synthetic schedules.
+        Uses real carbon intensity forecast data from CarbonService when available.
+        Identifies time windows where carbon intensity is below the green threshold,
+        ensuring data is based on actual forecasts rather than synthetic schedules.
         """
+        from app.services.carbon_service import CarbonService, GREEN_THRESHOLD_GCO2
+
         hubs_result = await db.execute(select(Hub))
         hubs = hubs_result.scalars().all()
 
@@ -103,24 +105,53 @@ class EnergyService:
         now = datetime.now(timezone.utc)
 
         for hub in hubs:
-            if hub.renewable_percentage > 30:
-                # Generate windows based on actual hub data
-                # Morning solar peak, afternoon sustained, evening wind
-                for i, (hour_offset, duration_hours) in enumerate([(6, 4), (10, 6), (18, 3)]):
-                    start = now.replace(hour=hour_offset, minute=0, second=0, microsecond=0)
-                    if start < now:
-                        start = start + timedelta(days=1)
-                    end = start + timedelta(hours=duration_hours)
-                    windows.append(GreenWindowResponse(
-                        hub_id=hub.id,
-                        hub_name=hub.name,
-                        start=start,
-                        end=end,
-                        renewable_percentage=round(hub.renewable_percentage, 2),
-                        estimated_co2_grams_per_kwh=round(hub.grid_carbon_intensity, 2),
-                        recommended=hub.renewable_percentage > 70,
-                    ))
+            # Map hub to electricity zone
+            from app.services.carbon_service import _hub_to_zone
+            zone = _hub_to_zone(hub)
 
+            try:
+                # Get real forecast data
+                forecast = await CarbonService.get_forecast(db, zone, hours=24)
+
+                # Extract green windows from forecast
+                for gw in forecast.green_windows:
+                    try:
+                        start = gw.get("start", "")
+                        end = gw.get("end", "")
+                        ci = gw.get("estimated_carbon_intensity_gco2_kwh", 0)
+
+                        # Parse ISO datetime strings
+                        if isinstance(start, str):
+                            start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                        else:
+                            start_dt = start
+                        if isinstance(end, str):
+                            end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                        else:
+                            end_dt = end
+
+                        # Only include future windows
+                        if end_dt > now:
+                            windows.append(GreenWindowResponse(
+                                hub_id=hub.id,
+                                hub_name=hub.name,
+                                start=start_dt,
+                                end=end_dt,
+                                renewable_percentage=hub.renewable_percentage,
+                                estimated_co2_grams_per_kwh=ci if ci > 0 else hub.grid_carbon_intensity,
+                                recommended=ci <= GREEN_THRESHOLD_GCO2 if ci > 0 else hub.renewable_percentage > 70,
+                            ))
+                    except (ValueError, TypeError, KeyError):
+                        continue
+            except Exception as exc:
+                import logging
+                logging.getLogger("harchos.energy").warning(
+                    "Could not get forecast for hub %s zone %s: %s", hub.name, zone, exc
+                )
+                continue
+
+        # Sort by start time
+        windows.sort(key=lambda w: w.start)
         return windows
 
     @staticmethod

@@ -14,18 +14,14 @@ Features:
 - dimensions parameter (like OpenAI's matryoshka embeddings)
 - Carbon footprint tracking per request
 - Token counting estimation (4 chars ≈ 1 token)
-- Proxy to real backend when HARCHOS_INFERENCE_BACKEND_URL is set
-- Mock mode returns realistic embedding vectors
+- Proxy to real backend when HARCHOS_INFERENCE_BACKEND_URL is set (required for embeddings)
 - Comprehensive Pydantic validation
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import math
 import re
-import struct
 import time
 import uuid
 from typing import Any
@@ -394,74 +390,25 @@ def _estimate_embedding_carbon(
 
 
 # ---------------------------------------------------------------------------
-# Deterministic mock vector generation
-# ---------------------------------------------------------------------------
-
-def _generate_mock_embedding(text: str, model_id: str, dimensions: int) -> list[float]:
-    """Generate a deterministic, realistic-looking embedding vector.
-
-    Uses SHA-256 hashing to produce deterministic floats in [-1, 1]
-    then normalizes to unit length, matching real embedding behavior.
-
-    The same input + model + dimensions always produces the same vector,
-    which is critical for caching and reproducibility in mock mode.
-    """
-    raw_values: list[float] = []
-    # Generate enough hash chunks to fill the dimensions
-    num_chunks = math.ceil(dimensions / 8)  # Each SHA-256 chunk yields 8 floats
-
-    for chunk_idx in range(num_chunks):
-        seed = f"{model_id}:{text}:{chunk_idx}"
-        digest = hashlib.sha256(seed.encode("utf-8")).digest()
-        # Each 4-byte segment becomes a float
-        for byte_offset in range(0, 32, 4):
-            if len(raw_values) >= dimensions:
-                break
-            uint_val = struct.unpack(">I", digest[byte_offset : byte_offset + 4])[0]
-            # Map to [-1, 1] range
-            normalized = (uint_val / 0xFFFFFFFF) * 2.0 - 1.0
-            raw_values.append(normalized)
-        if len(raw_values) >= dimensions:
-            break
-
-    vector = raw_values[:dimensions]
-
-    # L2 normalize — real embeddings always have unit norm
-    norm = math.sqrt(sum(v * v for v in vector))
-    if norm > 0:
-        vector = [v / norm for v in vector]
-
-    return vector
-
-
-def _encode_base64(vector: list[float]) -> str:
-    """Encode a float vector as base64 string (OpenAI base64 format).
-
-    Each float is encoded as a little-endian 32-bit IEEE 754 float,
-    then the entire byte buffer is base64-encoded.
-    """
-    import base64
-
-    raw_bytes = b"".join(struct.pack("<f", v) for v in vector)
-    return base64.b64encode(raw_bytes).decode("ascii")
-
-
-# ---------------------------------------------------------------------------
 # Backend proxy — forwards to real embedding backends when configured
 # ---------------------------------------------------------------------------
 
 async def _proxy_to_backend(
     request_body: dict,
     model_id: str,
-) -> httpx.Response | None:
+) -> httpx.Response:
     """Proxy an embedding request to a configured backend.
 
-    Checks for HARCHOS_INFERENCE_BACKEND_URL. If not set, returns None
-    (falls back to mock mode).
+    Raises HarchOSError if no backend is configured or if the backend
+    returns an error.
     """
     backend_url = getattr(settings, "inference_backend_url", "")
     if not backend_url:
-        return None
+        raise HarchOSError(
+            "E0500",
+            detail="Inference backend not configured. Set HARCHOS_INFERENCE_BACKEND_URL to enable embeddings. Contact contact@harchos.ai for setup assistance.",
+            meta={"configured": False},
+        )
 
     backend_api_key = getattr(settings, "inference_backend_api_key", "")
     timeout_seconds = getattr(settings, "inference_backend_timeout_seconds", 30)
@@ -586,6 +533,14 @@ async def create_embeddings(
     When `carbon_aware=true` (default), the request is routed to the
     greenest available hub.
     """
+    # Require a configured inference backend — embeddings cannot work without one
+    if not settings.inference_backend_url:
+        raise HarchOSError(
+            "E0500",
+            detail="Inference backend not configured. Set HARCHOS_INFERENCE_BACKEND_URL to enable embeddings. Contact contact@harchos.ai for setup assistance.",
+            meta={"configured": False},
+        )
+
     start_time = time.time()
 
     # Normalize input to a list of strings
@@ -632,108 +587,20 @@ async def create_embeddings(
     hub_region = "Ouarzazate"
     gpu_type = "A100"  # A100 is typical for embedding workloads
 
-    # --- Try real backend first ---
+    # Proxy to inference backend
     request_body = request.model_dump(exclude_none=True)
     backend_resp = await _proxy_to_backend(request_body, request.model)
 
-    if backend_resp is not None:
-        # Real backend responded — add carbon tracking and return
-        resp_data = backend_resp.json()
-        elapsed = time.time() - start_time
-
-        # Use actual token usage from backend if available
-        actual_usage = resp_data.get("usage", {})
-        prompt_tokens = actual_usage.get("prompt_tokens", total_tokens)
-
-        carbon = _estimate_embedding_carbon(
-            total_tokens=prompt_tokens,
-            num_texts=len(texts),
-            carbon_intensity_gco2_kwh=carbon_intensity,
-            renewable_percentage=renewable_pct,
-            gpu_type=gpu_type,
-            hub_region=hub_region,
-        )
-        carbon.inference_duration_seconds = round(elapsed, 4)
-
-        # Inject carbon data into OpenAI response
-        resp_data["carbon_footprint"] = carbon.model_dump()
-
-        return JSONResponse(
-            content=resp_data,
-            headers={
-                "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
-                "X-Carbon-Intensity": str(carbon_intensity),
-                "X-Renewable-Percentage": str(renewable_pct),
-                "X-Carbon-Saved-vs-Avg-gCO2": str(carbon.carbon_saved_vs_average_gco2),
-                "X-Embedding-Model": request.model,
-                "X-Embedding-Dimensions": str(effective_dimensions),
-            },
-        )
-
-    # --- Mock mode (no backend configured) ---
-
-    # Check embedding cache — same input+model+dimensions = same result
-    cache_key_parts = [
-        request.model,
-        str(effective_dimensions),
-        hashlib.sha256("|".join(texts).encode("utf-8")).hexdigest()[:16],
-    ]
-    cache_key = f"embeddings:vec:{':'.join(cache_key_parts)}"
-    cached_result = await get_cached_json(cache_key)
-
-    if cached_result is not None:
-        # Return cached embeddings but recalculate carbon with current intensity
-        elapsed = time.time() - start_time
-        carbon = _estimate_embedding_carbon(
-            total_tokens=total_tokens,
-            num_texts=len(texts),
-            carbon_intensity_gco2_kwh=carbon_intensity,
-            renewable_percentage=renewable_pct,
-            gpu_type=gpu_type,
-            hub_region=hub_region,
-        )
-        carbon.inference_duration_seconds = round(elapsed, 4)
-
-        # Reconstruct response from cache
-        cached_resp = EmbeddingResponse(**cached_result)
-        cached_resp.carbon_footprint = carbon
-
-        return JSONResponse(
-            content=cached_resp.model_dump(),
-            headers={
-                "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
-                "X-Carbon-Intensity": str(carbon_intensity),
-                "X-Renewable-Percentage": str(renewable_pct),
-                "X-Carbon-Saved-vs-Avg-gCO2": str(carbon.carbon_saved_vs_average_gco2),
-                "X-Embedding-Model": request.model,
-                "X-Embedding-Dimensions": str(effective_dimensions),
-                "X-Cache": "HIT",
-            },
-        )
-
-    # Generate mock embedding vectors
-    embedding_data: list[EmbeddingData] = []
-    for i, text in enumerate(texts):
-        vector = _generate_mock_embedding(text, request.model, effective_dimensions)
-
-        if request.encoding_format == "base64":
-            # OpenAI base64 format: encode the float array as base64
-            embedding_value: list[float] | str = _encode_base64(vector)
-        else:
-            embedding_value = vector
-
-        embedding_data.append(
-            EmbeddingData(
-                object="embedding",
-                embedding=embedding_value if request.encoding_format == "float" else vector,
-                index=i,
-            )
-        )
-
-    # Calculate carbon footprint
+    # Add carbon tracking to the backend response
+    resp_data = backend_resp.json()
     elapsed = time.time() - start_time
+
+    # Use actual token usage from backend if available
+    actual_usage = resp_data.get("usage", {})
+    prompt_tokens = actual_usage.get("prompt_tokens", total_tokens)
+
     carbon = _estimate_embedding_carbon(
-        total_tokens=total_tokens,
+        total_tokens=prompt_tokens,
         num_texts=len(texts),
         carbon_intensity_gco2_kwh=carbon_intensity,
         renewable_percentage=renewable_pct,
@@ -742,34 +609,11 @@ async def create_embeddings(
     )
     carbon.inference_duration_seconds = round(elapsed, 4)
 
-    # Build OpenAI-compatible response
-    response = EmbeddingResponse(
-        object="list",
-        data=embedding_data,
-        model=request.model,
-        usage=EmbeddingUsage(
-            prompt_tokens=total_tokens,
-            total_tokens=total_tokens,
-        ),
-        carbon_footprint=carbon,
-    )
-
-    # Cache the result (without carbon — it changes with grid intensity)
-    cacheable_response = response.model_dump()
-    cacheable_response["carbon_footprint"] = None
-    await set_cached_json(cache_key, cacheable_response, ttl_seconds=1800)
-
-    # Prepare response content — handle base64 encoding at the JSON level
-    resp_content = response.model_dump()
-
-    # Override embeddings with base64 if requested
-    if request.encoding_format == "base64":
-        for i, text in enumerate(texts):
-            vector = _generate_mock_embedding(text, request.model, effective_dimensions)
-            resp_content["data"][i]["embedding"] = _encode_base64(vector)
+    # Inject carbon data into OpenAI response
+    resp_data["carbon_footprint"] = carbon.model_dump()
 
     return JSONResponse(
-        content=resp_content,
+        content=resp_data,
         headers={
             "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
             "X-Carbon-Intensity": str(carbon_intensity),
@@ -777,7 +621,5 @@ async def create_embeddings(
             "X-Carbon-Saved-vs-Avg-gCO2": str(carbon.carbon_saved_vs_average_gco2),
             "X-Embedding-Model": request.model,
             "X-Embedding-Dimensions": str(effective_dimensions),
-            "X-Cache": "MISS",
-            "X-HarchOS-Mode": "mock",
         },
     )

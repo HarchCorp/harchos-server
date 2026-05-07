@@ -3,6 +3,8 @@
 All endpoints are under ``/v1/carbon/`` and require authentication.
 """
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,8 +21,12 @@ from app.schemas.carbon import (
     CarbonOptimizeRequest,
     CarbonOptimizeResponse,
 )
-from app.services.carbon_service import CarbonService
+from app.services.carbon_service import CarbonService, STATIC_CARBON_DATA
 from app.api.deps import require_auth, get_current_api_key
+from app.core.exceptions import HarchOSError
+
+# Valid zone codes for validation
+VALID_ZONE_CODES = set(STATIC_CARBON_DATA.keys())
 
 router = APIRouter()
 
@@ -41,10 +47,19 @@ async def get_zone_carbon_intensity(
 
     Example zones: MA (Morocco), FR (France), DE (Germany), GB (UK),
     SE (Sweden), NO (Norway), IS (Iceland), etc.
-    
+
     Public endpoint (auth optional).
     """
-    return await CarbonService.get_zone_intensity(db, zone.upper())
+    zone = zone.upper()
+    # Allow known zones and custom zones (Electricity Maps has more zones than our static data)
+    # Validate zone format: 2-15 alphanumeric chars with hyphens
+    if not re.match(r'^[A-Z0-9\-]{2,15}$', zone):
+        raise HarchOSError(
+            "E0200",
+            detail=f"Invalid zone code format: '{zone}'. Zone codes must be 2-15 alphanumeric characters.",
+            meta={"zone": zone, "valid_examples": list(VALID_ZONE_CODES)[:10]},
+        )
+    return await CarbonService.get_zone_intensity(db, zone)
 
 
 @router.get("/intensity", response_model=CarbonIntensityZoneListResponse)

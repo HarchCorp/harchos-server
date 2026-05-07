@@ -128,6 +128,7 @@ class CarbonService:
 
         Docs: https://api.electricitymap.org/
         Requires HARCHOS_ELECTRICITY_MAPS_API_KEY to be set.
+        Returns carbon intensity and power origin breakdown (fuel mix).
         """
         api_key = getattr(settings, "electricity_maps_api_key", "")
         if not api_key:
@@ -142,11 +143,30 @@ class CarbonService:
                 resp = await client.get(url, params={"zone": zone}, headers=headers)
                 if resp.status_code == 200:
                     data = resp.json()
+                    
+                    # Also fetch power origin breakdown for fuel mix
+                    fuel_mix = []
+                    try:
+                        power_url = "https://api.electricitymap.org/v3/power-origin/breakdown/latest"
+                        power_resp = await client.get(power_url, params={"zone": zone}, headers=headers)
+                        if power_resp.status_code == 200:
+                            power_data = power_resp.json()
+                            production = power_data.get("production", {})
+                            for source, value in production.items():
+                                if value and value > 0:
+                                    fuel_mix.append({
+                                        "source": source,
+                                        "percentage": round(value, 2),
+                                    })
+                    except Exception:
+                        pass  # Fuel mix is optional
+                    
                     return {
                         "zone": zone,
                         "carbon_intensity": data.get("carbonIntensity", 0),
                         "datetime": data.get("datetime", ""),
                         "updated_at": data.get("updatedAt", ""),
+                        "fuel_mix": fuel_mix,
                     }
                 logger.warning("Electricity Maps API returned %d for zone %s", resp.status_code, zone)
             except httpx.HTTPError as exc:
@@ -290,13 +310,14 @@ class CarbonService:
 
             # Cache in Redis for fast subsequent lookups
             cache_key = f"carbon:intensity:{zone}"
+            fuel_mix_data = live_data.get("fuel_mix", [])
             cache_data = {
                 "zone": zone,
                 "zone_name": static.get("zone_name", zone),
                 "carbon_intensity_gco2_kwh": float(ci),
                 "renewable_percentage": static.get("renewable_pct", 0.0),
                 "fossil_percentage": static.get("fossil_pct", 0.0),
-                "fuel_mix": [],
+                "fuel_mix": fuel_mix_data,
                 "source": source,
             }
             await set_cached_json(
@@ -304,13 +325,20 @@ class CarbonService:
                 ttl_seconds=settings.carbon_cache_ttl_minutes * 60,
             )
 
+            fuel_mix = []
+            if fuel_mix_data:
+                try:
+                    fuel_mix = [FuelMixEntry(**e) for e in fuel_mix_data]
+                except (TypeError, ValueError):
+                    pass
+
             return CarbonIntensityZoneResponse(
                 zone=zone,
                 zone_name=static.get("zone_name", zone),
                 carbon_intensity_gco2_kwh=float(ci),
                 renewable_percentage=static.get("renewable_pct", 0.0),
                 fossil_percentage=static.get("fossil_pct", 0.0),
-                fuel_mix=[],
+                fuel_mix=fuel_mix,
                 source=source,
                 is_forecast=False,
                 datetime=now,

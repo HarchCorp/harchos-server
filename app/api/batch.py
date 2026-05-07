@@ -38,12 +38,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import httpx
+
 from app.api.deps import require_auth
 from app.config import settings
 from app.core.exceptions import HarchOSError, rate_limit_exceeded, not_found, validation_error
 from app.database import get_db, async_session_factory
 from app.models.api_key import ApiKey
 from app.models.batch import BatchJob
+from app.models.model import Model as DBModel
 
 logger = logging.getLogger("harchos.batch")
 router = APIRouter()
@@ -84,9 +87,9 @@ BATCH_SUBMISSION_RATE_LIMITS = {
     "enterprise": 100,
 }
 
-# Model catalog (shared reference from inference — duplicated here for
-# standalone validation without circular imports)
-VALID_MODEL_IDS = [
+# Default model catalog for validation (used before DB is available).
+# In production, models are loaded from the database via _get_valid_model_ids().
+DEFAULT_VALID_MODEL_IDS = [
     "harchos-llama-3.3-70b",
     "harchos-llama-3.3-8b",
     "harchos-llama-4-maverick",
@@ -110,6 +113,34 @@ VALID_MODEL_IDS = [
     "harchos-llama-guard-4",
     "harchos-embedding-3-large",
 ]
+
+
+# Cache for valid model IDs loaded from DB
+_cached_model_ids: list[str] | None = None
+
+
+async def _get_valid_model_ids(db: AsyncSession | None = None) -> list[str]:
+    """Get valid model IDs, preferring DB data when available."""
+    global _cached_model_ids
+
+    if db is not None:
+        try:
+            result = await db.execute(select(DBModel).where(DBModel.status == "ready"))
+            db_models = result.scalars().all()
+            if db_models:
+                model_ids = [
+                    f"harchos-{m.name.lower().replace(' ', '-')}"
+                    for m in db_models
+                ]
+                _cached_model_ids = model_ids
+                return model_ids
+        except Exception:
+            pass
+
+    if _cached_model_ids is not None:
+        return _cached_model_ids
+
+    return DEFAULT_VALID_MODEL_IDS
 
 
 # ---------------------------------------------------------------------------
@@ -225,10 +256,12 @@ class BatchRequestItem(BaseModel):
     @field_validator("model")
     @classmethod
     def validate_model(cls, v: str) -> str:
-        if v not in VALID_MODEL_IDS:
+        # Use default list for Pydantic validation (DB not available at parse time)
+        # Runtime validation also checks against DB in the endpoint
+        if v not in DEFAULT_VALID_MODEL_IDS:
             raise ValueError(
-                f"Unknown model '{v}'. Available: {', '.join(VALID_MODEL_IDS[:5])}... "
-                f"({len(VALID_MODEL_IDS)} total)"
+                f"Unknown model '{v}'. Available: {', '.join(DEFAULT_VALID_MODEL_IDS[:5])}... "
+                f"({len(DEFAULT_VALID_MODEL_IDS)} total)"
             )
         return v
 
@@ -494,9 +527,9 @@ async def _process_batch_item(
 ) -> dict[str, Any]:
     """Process a single batch item asynchronously.
 
-    In production, this would forward to the inference backend (vLLM,
-    Together AI, etc.). For now, it simulates inference with a small
-    delay proportional to estimated token count.
+    Proxies to the configured inference backend (vLLM, Together AI, etc.)
+    for real LLM inference. Falls back to an error if no backend is
+    configured — no mock responses.
     """
     request_id = item["request_id"]
     model = item["model"]
@@ -506,28 +539,68 @@ async def _process_batch_item(
         # Update status to processing
         item["status"] = BatchItemStatus.PROCESSING.value
 
-        # Estimate tokens
-        prompt_tokens = sum(_estimate_tokens(m.get("content", "")) for m in messages)
-        completion_tokens = min(item.get("max_tokens") or 150, 150)
+        # Check for inference backend
+        backend_url = getattr(settings, "inference_backend_url", "")
+        if not backend_url:
+            raise RuntimeError(
+                "Inference backend not configured. Set HARCHOS_INFERENCE_BACKEND_URL."
+            )
 
-        # Simulate inference delay (10-50ms per item depending on size)
-        delay = 0.01 + (completion_tokens / 150) * 0.04
-        await asyncio.sleep(delay)
+        # Map harchos- model IDs to backend model IDs
+        backend_model = model.replace("harchos-", "")
+        backend_api_key = getattr(settings, "inference_backend_api_key", "")
 
-        # Generate mock response content
-        response_text = (
-            f"[HarchOS Batch Inference] Processed on {hub_region} hub — "
-            f"{renewable_percentage:.0f}% renewable energy, "
-            f"{carbon_intensity_gco2_kwh:.0f} gCO2/kWh carbon intensity. "
-            f"Model: {model}. Batch discount: 50% (gCO2 halved). "
-            f"Carbon transparency is our standard."
-        )
+        # Build OpenAI-compatible request
+        body = {
+            "model": backend_model,
+            "messages": messages,
+            "temperature": item.get("temperature", 0.7),
+            "top_p": item.get("top_p", 1.0),
+        }
+        if item.get("max_tokens"):
+            body["max_tokens"] = item["max_tokens"]
+        if item.get("stop"):
+            body["stop"] = item["stop"]
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {backend_api_key}",
+        }
+        url = f"{backend_url.rstrip('/')}/chat/completions"
+
+        # Call the backend with timeout
+        timeout = httpx.Timeout(30.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=body, headers=headers)
+
+        if resp.status_code != 200:
+            error_detail = f"Backend returned HTTP {resp.status_code}"
+            try:
+                error_body = resp.json()
+                error_detail = error_body.get("error", {}).get("message", error_detail)
+            except Exception:
+                pass
+            raise RuntimeError(error_detail)
+
+        resp_data = resp.json()
+
+        # Extract response from backend
+        prompt_tokens = resp_data.get("usage", {}).get("prompt_tokens", 0)
+        completion_tokens = resp_data.get("usage", {}).get("completion_tokens", 0)
+
+        # Get assistant message from choices
+        choices = resp_data.get("choices", [])
+        response_text = ""
+        finish_reason = "stop"
+        if choices:
+            response_text = choices[0].get("message", {}).get("content", "")
+            finish_reason = choices[0].get("finish_reason", "stop")
 
         # Estimate carbon with batch discount
         carbon = _estimate_batch_item_carbon(
             model_id=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+            prompt_tokens=prompt_tokens or sum(_estimate_tokens(m.get("content", "")) for m in messages),
+            completion_tokens=completion_tokens or min(item.get("max_tokens") or 150, 150),
             carbon_intensity_gco2_kwh=carbon_intensity_gco2_kwh,
             renewable_percentage=renewable_percentage,
             gpu_type=gpu_type,
@@ -536,7 +609,7 @@ async def _process_batch_item(
 
         item["status"] = BatchItemStatus.COMPLETED.value
         item["message"] = {"role": "assistant", "content": response_text}
-        item["finish_reason"] = "stop"
+        item["finish_reason"] = finish_reason
         item["usage"] = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,

@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # If empty, a random key is generated at seed time (logged once)
     default_api_key: str = ""
 
+    # Admin bootstrap — one-time admin creation in production
+    # Set this to a strong random token, then use POST /v1/auth/bootstrap
+    admin_bootstrap_token: str = ""  # Empty = bootstrap disabled
+
     # Carbon-aware scheduling
     # Get your free trial key at: https://app.electricitymaps.com/auth/sign-up
     # Academic access: free with .edu email

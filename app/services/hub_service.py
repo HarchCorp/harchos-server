@@ -20,7 +20,7 @@ class HubService:
     """Service for hub CRUD operations."""
 
     @staticmethod
-    def _to_response(hub: Hub) -> HubResponse:
+    def _to_response(hub: Hub, active_workloads: int = 0) -> HubResponse:
         """Convert an ORM Hub to a HubResponse schema with nested metadata/spec."""
 
         # --- metadata ---
@@ -100,7 +100,7 @@ class HubService:
             capacity=capacity,
             carbon_metrics=carbon_metrics,
             endpoint=endpoint,
-            active_workloads=0,
+            active_workloads=active_workloads,
         )
 
     @staticmethod
@@ -135,7 +135,19 @@ class HubService:
         result = await db.execute(query)
         hubs = result.scalars().all()
 
-        items = [HubService._to_response(hub) for hub in hubs]
+        # Get active workload counts per hub
+        from app.models.workload import Workload
+        hub_ids = [hub.id for hub in hubs]
+        active_workloads_map = {}
+        if hub_ids:
+            wl_result = await db.execute(
+                select(Workload.hub_id, func.count(Workload.id))
+                .where(Workload.hub_id.in_(hub_ids), Workload.status.in_(["running", "scheduled"]))
+                .group_by(Workload.hub_id)
+            )
+            active_workloads_map = dict(wl_result.all())
+
+        items = [HubService._to_response(hub, active_workloads=active_workloads_map.get(hub.id, 0)) for hub in hubs]
         return PaginatedResponse.create(items=items, total=total, page=page, per_page=per_page)
 
     @staticmethod
@@ -145,7 +157,16 @@ class HubService:
         hub = result.scalar_one_or_none()
         if not hub:
             return None
-        return HubService._to_response(hub)
+        
+        # Get active workload count
+        from app.models.workload import Workload
+        wl_result = await db.execute(
+            select(func.count(Workload.id))
+            .where(Workload.hub_id == hub_id, Workload.status.in_("running", "scheduled"))
+        )
+        active_wl = wl_result.scalar() or 0
+        
+        return HubService._to_response(hub, active_workloads=active_wl)
 
     @staticmethod
     async def create_hub(db: AsyncSession, data: HubCreate) -> HubResponse:

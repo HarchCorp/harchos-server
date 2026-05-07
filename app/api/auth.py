@@ -52,6 +52,13 @@ class RegisterResponse(BaseModel):
     token: TokenResponse
 
 
+class AdminBootstrapRequest(BaseModel):
+    """Request body for admin bootstrap — one-time setup."""
+    email: EmailStr = Field(..., description="Admin email address")
+    name: str = Field(..., min_length=1, max_length=255, description="Admin full name")
+    bootstrap_token: str = Field(..., description="Bootstrap token from HARCHOS_ADMIN_BOOTSTRAP_TOKEN env var")
+
+
 class ApiKeyRevokeResponse(BaseModel):
     """Response after revoking an API key."""
     id: str
@@ -258,6 +265,101 @@ async def register(
         resource_type="user",
         resource_id=user.id,
         details={"email": data.email, "role": data.role},
+    )
+
+    return RegisterResponse(
+        user=UserInfo(
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            is_active=user.is_active,
+            created_at=user.created_at,
+        ),
+        api_key=api_key_response,
+        token=token_response,
+    )
+
+
+@router.post("/bootstrap", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
+async def admin_bootstrap(
+    data: AdminBootstrapRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Bootstrap the first admin user for production setup.
+
+    This endpoint ONLY works when:
+    1. No admin user exists in the database yet
+    2. The HARCHOS_ADMIN_BOOTSTRAP_TOKEN env var is set and matches the request token
+
+    This provides a secure way to create the initial admin in production
+    without leaving registration open. After the first admin is created,
+    this endpoint returns 403 permanently.
+
+    To use: Set HARCHOS_ADMIN_BOOTSTRAP_TOKEN in your environment, then:
+    POST /v1/auth/bootstrap
+    {
+        "email": "admin@yourcompany.com",
+        "name": "Your Name",
+        "bootstrap_token": "your-secret-token"
+    }
+    """
+    # Verify bootstrap token
+    bootstrap_token = getattr(settings, "admin_bootstrap_token", "")
+    if not bootstrap_token:
+        raise HarchOSError(
+            "E0105",
+            detail="Admin bootstrap is not configured. Set HARCHOS_ADMIN_BOOTSTRAP_TOKEN to enable one-time admin setup.",
+        )
+
+    if data.bootstrap_token != bootstrap_token:
+        raise HarchOSError("E0101", detail="Invalid bootstrap token")
+
+    # Check if any admin already exists
+    admin_result = await db.execute(
+        select(User).where(User.role == "admin")
+    )
+    existing_admin = admin_result.scalar_one_or_none()
+    if existing_admin:
+        raise HarchOSError(
+            "E0105",
+            detail="Admin user already exists. Bootstrap is a one-time operation. Use the admin panel to manage users.",
+        )
+
+    # Check if email already exists
+    existing = await db.execute(select(User).where(User.email == data.email))
+    if existing.scalar_one_or_none():
+        raise already_exists("user", "email")
+
+    # Create admin user
+    user = User(
+        email=data.email,
+        name=data.name,
+        is_active=True,
+        role="admin",
+    )
+    db.add(user)
+    await db.flush()
+
+    # Create admin API key with enterprise tier
+    api_key_response = await AuthService.create_api_key(
+        db, user_id=user.id, name="Admin API Key", tier="enterprise",
+        scopes=["inference:write", "workloads:write", "carbon:read", "admin:full"],
+    )
+
+    # Create JWT token
+    api_key_obj_result = await db.execute(select(ApiKey).where(ApiKey.id == api_key_response.id))
+    api_key_obj = api_key_obj_result.scalar_one()
+
+    token_response = AuthService.create_jwt_token(
+        api_key_id=api_key_obj.id,
+        user_id=user.id,
+    )
+
+    audit_log(
+        action="admin_bootstrap",
+        resource_type="user",
+        resource_id=user.id,
+        details={"email": data.email, "role": "admin"},
     )
 
     return RegisterResponse(

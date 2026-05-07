@@ -16,7 +16,7 @@ services:
       - "8000:8000"
     environment:
       - HARCHOS_DATABASE_URL=postgresql+asyncpg://harchos:${POSTGRES_PASSWORD:-harchos_prod_2025}@postgres:5432/harchos
-      - HARCHOS_SECRET_KEY=${SECRET_KEY:-change-this-in-production}
+      - HARCHOS_SECRET_KEY=${SECRET_KEY:?ERROR-Set-SECRET_KEY-in-env-file}
       - HARCHOS_DEBUG=false
       - HARCHOS_ENVIRONMENT=production
       - HARCHOS_LOG_LEVEL=INFO

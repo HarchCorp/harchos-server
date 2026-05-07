@@ -17,10 +17,13 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from app.database import get_db
 from app.models.api_key import ApiKey
+from app.models.model import Model as DBModel
 from app.api.deps import require_auth
-from app.api.inference import HARCHOS_MODELS
+from app.api.inference import _get_models_from_db
 from app.config import settings
 from app.cache import get_cached_json, set_cached_json
 from app.core.exceptions import HarchOSError
@@ -162,9 +165,10 @@ async def model_health_check(
     and the carbon intensity at the hub where the model is served.
     This endpoint is useful for monitoring dashboards and alerting.
     """
-    # Validate model exists
-    model = next((m for m in HARCHOS_MODELS if m["id"] == model_id), None)
-    if not model:
+    # Validate model exists (check DB)
+    db_models = await _get_models_from_db(db)
+    model_info = next((m for m in db_models if m.id == model_id), None)
+    if not model_info:
         raise HarchOSError("E0502", detail=f"Model '{model_id}' is not available.")
 
     # Check if backend is available
@@ -229,9 +233,19 @@ async def model_detailed_status(
     Returns comprehensive information about a model's current state,
     including performance metrics, carbon data, and capabilities.
     """
-    model = next((m for m in HARCHOS_MODELS if m["id"] == model_id), None)
-    if not model:
+    # Validate model exists (check DB)
+    db_models = await _get_models_from_db(db)
+    model_info = next((m for m in db_models if m.id == model_id), None)
+    if not model_info:
         raise HarchOSError("E0502", detail=f"Model '{model_id}' is not available.")
+
+    # Also fetch raw DB model for additional fields
+    result = await db.execute(select(DBModel).where(DBModel.status == "ready"))
+    db_model = None
+    for row in result.scalars().all():
+        if f"harchos-{row.name.lower().replace(' ', '-')}" == model_id:
+            db_model = row
+            break
 
     # Get health data
     health = await model_health_check(model_id, api_key, db)
@@ -287,22 +301,22 @@ async def model_detailed_status(
     }
 
     # Capabilities
-    model_family = model.get("family", "")
+    model_family = model_info.family or ""
     capabilities = {
         "streaming": True,
         "function_calling": model_family in ("llama", "mistral", "qwen"),
         "vision": False,
         "code": model_family in ("starcoder", "gemma", "phi"),
         "multilingual": model_family in ("llama", "qwen", "mistral"),
-        "max_context_length": 8192 if model.get("params_b", 0) < 30 else 128000,
+        "max_context_length": 8192 if model_info.parameter_count_b < 30 else 128000,
         "max_output_tokens": 4096,
     }
 
     return ModelStatusResponse(
         model_id=model_id,
-        name=model.get("name", model_id),
+        name=db_model.name if db_model else model_id,
         family=model_family,
-        parameter_count_b=model.get("params_b", 0),
+        parameter_count_b=model_info.parameter_count_b,
         status=health.status,
         health=health,
         metrics=metrics,
@@ -317,14 +331,17 @@ async def model_detailed_status(
 async def model_inference_metrics(
     model_id: str,
     api_key: ApiKey = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
 ):
     """Get inference metrics for a specific model.
 
     Returns request counts, latency percentiles, error rates,
     carbon footprint, and throughput data.
     """
-    model = next((m for m in HARCHOS_MODELS if m["id"] == model_id), None)
-    if not model:
+    # Validate model exists (check DB)
+    db_models = await _get_models_from_db(db)
+    model_info = next((m for m in db_models if m.id == model_id), None)
+    if not model_info:
         raise HarchOSError("E0502", detail=f"Model '{model_id}' is not available.")
 
     metrics_data = _get_or_init_metrics(model_id)

@@ -24,6 +24,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -153,36 +154,6 @@ class InferenceProvider(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Available models — the catalog HarchOS offers
-# ---------------------------------------------------------------------------
-
-HARCHOS_MODELS = [
-    {"id": "harchos-llama-3.3-70b", "name": "Llama 3.3 70B", "family": "llama", "params_b": 70},
-    {"id": "harchos-llama-3.3-8b", "name": "Llama 3.3 8B", "family": "llama", "params_b": 8},
-    {"id": "harchos-llama-4-maverick", "name": "Llama 4 Maverick 17Bx128E", "family": "llama", "params_b": 400},
-    {"id": "harchos-mistral-large", "name": "Mistral Large 2411", "family": "mistral", "params_b": 123},
-    {"id": "harchos-mistral-small", "name": "Mistral Small 2501", "family": "mistral", "params_b": 24},
-    {"id": "harchos-qwen-2.5-72b", "name": "Qwen 2.5 72B", "family": "qwen", "params_b": 72},
-    {"id": "harchos-qwen-2.5-7b", "name": "Qwen 2.5 7B", "family": "qwen", "params_b": 7},
-    {"id": "harchos-deepseek-v3", "name": "DeepSeek V3", "family": "deepseek", "params_b": 671},
-    {"id": "harchos-deepseek-r1-70b", "name": "DeepSeek R1 70B", "family": "deepseek", "params_b": 70},
-    {"id": "harchos-gemma-3-27b", "name": "Gemma 3 27B", "family": "gemma", "params_b": 27},
-    {"id": "harchos-gemma-3-4b", "name": "Gemma 3 4B", "family": "gemma", "params_b": 4},
-    {"id": "harchos-phi-4", "name": "Phi-4 14B", "family": "phi", "params_b": 14},
-    {"id": "harchos-codegemma-7b", "name": "CodeGemma 7B", "family": "gemma", "params_b": 7},
-    {"id": "harchos-starcoder2-15b", "name": "StarCoder2 15B", "family": "starcoder", "params_b": 15},
-    {"id": "harchos-cohere-command-r", "name": "Command R 35B", "family": "cohere", "params_b": 35},
-    {"id": "harchos-cohere-command-r-plus", "name": "Command R+ 104B", "family": "cohere", "params_b": 104},
-    {"id": "harchos-mixtral-8x22b", "name": "Mixtral 8x22B", "family": "mistral", "params_b": 141},
-    {"id": "harchos-mixtral-8x7b", "name": "Mixtral 8x7B", "family": "mistral", "params_b": 47},
-    {"id": "harchos-yi-1.5-34b", "name": "Yi 1.5 34B", "family": "yi", "params_b": 34},
-    {"id": "harchos-solar-10.7b", "name": "SOLAR 10.7B", "family": "solar", "params_b": 10.7},
-    {"id": "harchos-llama-guard-4", "name": "Llama Guard 4 12B", "family": "llama", "params_b": 12},
-    {"id": "harchos-embedding-3-large", "name": "Embedding 3 Large", "family": "embedding", "params_b": 0},
-]
-
-
-# ---------------------------------------------------------------------------
 # Token estimation (approximate — real tokenizers are model-specific)
 # ---------------------------------------------------------------------------
 
@@ -251,6 +222,30 @@ def _generate_response_id() -> str:
     return f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
 
+async def _get_models_from_db(db: AsyncSession) -> list[ModelInfo]:
+    """Query available models from the database.
+
+    Returns a list of ModelInfo objects for models with status 'ready'.
+    Used as fallback when no inference backend is configured.
+    """
+    from app.models.model import Model as DBModel
+    result = await db.execute(select(DBModel).where(DBModel.status == "ready"))
+    db_models = result.scalars().all()
+
+    return [
+        ModelInfo(
+            id=f"harchos-{m.name.lower().replace(' ', '-')}",
+            created=int(m.created_at.timestamp()) if m.created_at else 1700000000,
+            owned_by="harchos",
+            carbon_intensity_gco2_kwh=47.0,
+            hub_region="Morocco",
+            family=m.framework or "",
+            parameter_count_b=0,
+        )
+        for m in db_models
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Backend proxy — forwards to real LLM backends when configured
 # ---------------------------------------------------------------------------
@@ -263,7 +258,7 @@ async def _proxy_to_backend(
     """Proxy an inference request to a configured backend.
 
     Checks for HARCHOS_INFERENCE_BACKEND_URL. If not set, returns None
-    (falls back to mock mode).
+    (callers should check backend_url before calling this function).
     """
     backend_url = getattr(settings, "inference_backend_url", "")
     if not backend_url:
@@ -343,20 +338,13 @@ async def list_inference_models(
         except Exception:
             pass  # Fall back to local catalog
 
-    # Local model catalog (fallback)
-    models = [
-        ModelInfo(
-            id=m["id"],
-            created=1700000000,
-            owned_by="harchos",
-            carbon_intensity_gco2_kwh=47.0,
-            hub_region="Morocco",
-            family=m.get("family", ""),
-            parameter_count_b=m.get("params_b", 0),
-        )
-        for m in HARCHOS_MODELS
-    ]
-    return ModelListResponse(data=models)
+    # Local model catalog (fallback from DB)
+    models = await _get_models_from_db(db)
+    if models:
+        return ModelListResponse(data=models)
+
+    # Ultimate fallback: return empty list
+    return ModelListResponse(data=[])
 
 
 @router.post("/chat/completions")
@@ -376,8 +364,9 @@ async def chat_completions(
     """
     start_time = time.time()
 
-    # Validate model
-    model_ids = [m["id"] for m in HARCHOS_MODELS]
+    # Validate model against DB
+    db_models = await _get_models_from_db(db)
+    model_ids = [m.id for m in db_models]
     if request.model not in model_ids:
         raise model_not_available(request.model)
 
@@ -400,7 +389,15 @@ async def chat_completions(
     hub_region = "Ouarzazate"
     gpu_type = "H100"
 
-    # Try to proxy to real backend first
+    # Require inference backend — no mock mode
+    backend_url = getattr(settings, "inference_backend_url", "")
+    if not backend_url:
+        raise HarchOSError(
+            "E0500",
+            detail="Inference backend not configured. Set HARCHOS_INFERENCE_BACKEND_URL to enable LLM inference. Contact contact@harchos.ai for setup assistance.",
+            meta={"configured": False, "setup_docs": "https://docs.harchos.ai/inference-setup"},
+        )
+
     request_body = request.model_dump(exclude={"carbon_aware", "carbon_preference"})
     backend_resp = await _proxy_to_backend(request_body, request.model, request.stream)
 
@@ -443,62 +440,8 @@ async def chat_completions(
             },
         )
 
-    # --- Mock mode (no backend configured) ---
-    if request.stream:
-        return await _stream_chat_completion(request, intensity, hub_region, gpu_type, is_mock=True)
-
-    # Non-streaming mock response
-    prompt_tokens = sum(_estimate_tokens(m.content) for m in request.messages)
-    completion_tokens = min(request.max_tokens or 150, 150)
-    elapsed = time.time() - start_time
-
-    carbon = _estimate_inference_carbon(
-        model_id=request.model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        carbon_intensity_gco2_kwh=intensity.carbon_intensity_gco2_kwh,
-        renewable_percentage=intensity.renewable_percentage,
-        gpu_type=gpu_type,
-        hub_region=hub_region,
-    )
-    carbon.inference_duration_seconds = round(elapsed, 3)
-
-    response_text = (
-        f"I'm running on HarchOS infrastructure in {hub_region}, Morocco — powered by "
-        f"{intensity.renewable_percentage:.0f}% renewable energy with a carbon intensity "
-        f"of just {intensity.carbon_intensity_gco2_kwh:.0f} gCO2/kWh. This inference "
-        f"generated approximately {carbon.gco2_per_request:.4f} grams of CO2, saving "
-        f"{carbon.carbon_saved_vs_average_gco2:.4f}g vs the global grid average. "
-        f"No other AI platform gives you this level of carbon transparency."
-    )
-
-    return JSONResponse(
-        content=ChatCompletionResponse(
-            id=_generate_response_id(),
-            created=int(time.time()),
-            model=request.model,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content=response_text),
-                    finish_reason="stop",
-                )
-            ],
-            usage=UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
-            carbon_footprint=carbon,
-        ).model_dump(),
-        headers={
-            "X-HarchOS-Mode": "mock",
-            "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
-            "X-Carbon-Intensity": str(intensity.carbon_intensity_gco2_kwh),
-            "X-Renewable-Percentage": str(intensity.renewable_percentage),
-            "X-Carbon-Saved-vs-Avg-gCO2": str(carbon.carbon_saved_vs_average_gco2),
-        },
-    )
+    # Backend returned None — this should not happen since we checked backend_url above
+    raise HarchOSError("E0500", detail="Inference backend returned no response.")
 
 
 @router.post("/completions")
@@ -520,139 +463,69 @@ async def completions(
     estimated_cost = (prompt_tokens_est + completion_tokens_est) / 1000 * 0.002
     await check_spending_limit(api_key, estimated_cost)
 
+    # Require inference backend — no mock mode
+    backend_url = getattr(settings, "inference_backend_url", "")
+    if not backend_url:
+        raise HarchOSError(
+            "E0500",
+            detail="Inference backend not configured. Set HARCHOS_INFERENCE_BACKEND_URL to enable LLM inference.",
+            meta={"configured": False},
+        )
+
     from app.services.carbon_service import CarbonService
     intensity = await CarbonService.get_zone_intensity(db, "MA")
 
-    prompt_tokens = _estimate_tokens(request.prompt)
-    completion_tokens = min(request.max_tokens or 100, 100)
-    elapsed = time.time() - start_time
+    hub_region = "Ouarzazate"
+    gpu_type = "H100"
 
-    carbon = _estimate_inference_carbon(
-        model_id=request.model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        carbon_intensity_gco2_kwh=intensity.carbon_intensity_gco2_kwh,
-        renewable_percentage=intensity.renewable_percentage,
-        gpu_type="H100",
-        hub_region="Ouarzazate",
-    )
-    carbon.inference_duration_seconds = round(elapsed, 3)
+    # Proxy to real backend
+    request_body = request.model_dump(exclude={"carbon_aware", "carbon_preference"})
+    backend_resp = await _proxy_to_backend(request_body, request.model, request.stream)
 
-    return JSONResponse(
-        content=CompletionResponse(
-            id=_generate_response_id(),
-            created=int(time.time()),
-            model=request.model,
-            choices=[
-                CompletionChoice(
-                    index=0,
-                    text=f"[HarchOS Carbon-Aware Inference] Processed on {intensity.renewable_percentage:.0f}% renewable energy. CO2: {carbon.gco2_per_request:.4f}g. Saved vs avg: {carbon.carbon_saved_vs_average_gco2:.4f}g.",
-                    finish_reason="stop",
-                )
-            ],
-            usage=UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
-            carbon_footprint=carbon,
-        ).model_dump(),
-        headers={
-            "X-HarchOS-Mode": "mock",
-            "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
-        },
-    )
+    if backend_resp is not None:
+        # Real backend responded — add carbon tracking and return
+        if request.stream:
+            return await _stream_backend_response(backend_resp, intensity, hub_region, gpu_type, request.model, start_time)
+
+        resp_data = backend_resp.json()
+        elapsed = time.time() - start_time
+
+        # Calculate carbon based on actual token usage
+        actual_usage = resp_data.get("usage", {})
+        prompt_tokens = actual_usage.get("prompt_tokens", 0) or _estimate_tokens(request.prompt)
+        completion_tokens = actual_usage.get("completion_tokens", 0) or 0
+
+        carbon = _estimate_inference_carbon(
+            model_id=request.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            carbon_intensity_gco2_kwh=intensity.carbon_intensity_gco2_kwh,
+            renewable_percentage=intensity.renewable_percentage,
+            gpu_type=gpu_type,
+            hub_region=hub_region,
+        )
+        carbon.inference_duration_seconds = round(elapsed, 3)
+
+        # Inject carbon data into OpenAI response
+        resp_data["carbon_footprint"] = carbon.model_dump()
+
+        return JSONResponse(
+            content=resp_data,
+            headers={
+                "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
+                "X-Carbon-Intensity": str(intensity.carbon_intensity_gco2_kwh),
+                "X-Renewable-Percentage": str(intensity.renewable_percentage),
+                "X-Carbon-Saved-vs-Avg-gCO2": str(carbon.carbon_saved_vs_average_gco2),
+            },
+        )
+
+    # Backend returned None — this should not happen since we checked backend_url above
+    raise HarchOSError("E0500", detail="Inference backend returned no response.")
 
 
 # ---------------------------------------------------------------------------
 # Streaming support
 # ---------------------------------------------------------------------------
-
-async def _stream_chat_completion(
-    request: ChatCompletionRequest,
-    intensity,
-    hub_region: str,
-    gpu_type: str,
-    is_mock: bool = False,
-) -> StreamingResponse:
-    """Stream a chat completion via SSE (Server-Sent Events) — OpenAI-compatible."""
-
-    prompt_tokens = sum(_estimate_tokens(m.content) for m in request.messages)
-    max_tokens = min(request.max_tokens or 80, 80)
-
-    carbon = _estimate_inference_carbon(
-        model_id=request.model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=max_tokens,
-        carbon_intensity_gco2_kwh=intensity.carbon_intensity_gco2_kwh,
-        renewable_percentage=intensity.renewable_percentage,
-        gpu_type=gpu_type,
-        hub_region=hub_region,
-    )
-
-    response_id = _generate_response_id()
-    created = int(time.time())
-
-    words = (
-        f"I'm running on HarchOS in {hub_region} — {intensity.renewable_percentage:.0f}% renewable, "
-        f"{intensity.carbon_intensity_gco2_kwh:.0f} gCO2/kWh. This inference: {carbon.gco2_per_request:.4f}g CO2. "
-        f"Saved {carbon.carbon_saved_vs_average_gco2:.4f}g vs global average. "
-        f"No other platform offers carbon transparency like this."
-    ).split()
-
-    async def generate() -> AsyncIterator[str]:
-        for i, word in enumerate(words):
-            chunk = {
-                "id": response_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": request.model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": word + " "} if i > 0 else {"role": "assistant", "content": word + " "},
-                    "finish_reason": None,
-                }],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-            await asyncio.sleep(0.02)
-
-        # Final chunk with finish_reason + carbon data
-        final_chunk = {
-            "id": response_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": request.model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop",
-            }],
-            "carbon_footprint": carbon.model_dump(),
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": len(words),
-                "total_tokens": prompt_tokens + len(words),
-            },
-        }
-        yield f"data: {json.dumps(final_chunk)}\n\n"
-        yield "data: [DONE]\n\n"
-
-    mock_header = {"X-HarchOS-Mode": "mock"} if is_mock else {}
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
-            "X-Carbon-Intensity": str(intensity.carbon_intensity_gco2_kwh),
-            "X-Renewable-Percentage": str(intensity.renewable_percentage),
-            "X-Carbon-Saved-vs-Avg-gCO2": str(carbon.carbon_saved_vs_average_gco2),
-            **mock_header,
-        },
-    )
-
 
 async def _stream_backend_response(
     backend_resp: httpx.Response,
