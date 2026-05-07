@@ -28,3 +28,11 @@ value = "harchos-prod-secret-key-2026"
 [[deploy.env]]
 name = "HARCHOS_CORS_ORIGINS"
 value = "[\"*\"]"
+
+[[deploy.env]]
+name = "HARCHOS_DEFAULT_API_KEY"
+value = "hsk_prod_e2e_test_2026_morocco"
+
+[[deploy.env]]
+name = "HARCHOS_ADMIN_BOOTSTRAP_TOKEN"
+value = "harchos-bootstrap-admin-2026-secure"
