@@ -246,7 +246,25 @@ async def seed():
     async with async_session_factory() as session:
         # Check if already seeded
         result = await session.execute(select(User).limit(1))
-        if result.scalar_one_or_none():
+        existing_user = result.scalar_one_or_none()
+        if existing_user:
+            # Fix: Ensure the admin user has role='admin' (may have been seeded
+            # with role='user' in earlier versions that didn't pass role explicitly)
+            if existing_user.email == "admin@harchos.ai" and existing_user.role != "admin":
+                existing_user.role = "admin"
+                logger.info("Updated admin user role from '%s' to 'admin'", existing_user.role)
+                await session.flush()
+
+            # Fix: Ensure the admin API key has tier='enterprise'
+            key_result = await session.execute(
+                select(ApiKey).where(ApiKey.user_id == existing_user.id, ApiKey.is_active.is_(True))
+            )
+            admin_key = key_result.scalar_one_or_none()
+            if admin_key and admin_key.tier != "enterprise":
+                admin_key.tier = "enterprise"
+                logger.info("Updated admin API key tier from '%s' to 'enterprise'", admin_key.tier)
+                await session.flush()
+
             logger.info("Database already seeded. Skipping.")
             return
 
