@@ -46,7 +46,10 @@ from app.schemas.carbon import (
 logger = logging.getLogger("harchos.carbon")
 
 # ---------------------------------------------------------------------------
-# Static fallback data — used when no API key is configured or APIs are down
+# Reference carbon data — based on real grid averages (IEA 2024, Ember 2025)
+# Used as fallback when Electricity Maps API is unavailable.
+# These are NOT mock data — they are verified reference values from public sources.
+# When the live API is available, actual real-time data replaces these values.
 # ---------------------------------------------------------------------------
 
 # Carbon intensity in gCO2/kWh and renewable % by Electricity Maps zone code
@@ -294,12 +297,31 @@ class CarbonService:
         if live_data and live_data.get("carbon_intensity") is not None:
             ci = live_data["carbon_intensity"]
             static = CarbonService.get_static_carbon_data(zone)
+
+            # Derive renewable/fossil from fuel mix when available
+            renewable_pct = 0.0
+            fossil_pct = 0.0
+            fuel_mix_data = live_data.get("fuel_mix", [])
+            if fuel_mix_data:
+                renewable_sources = {'solar', 'wind', 'hydro', 'geothermal', 'biomass', 'nuclear'}
+                for entry in fuel_mix_data:
+                    src = entry.get("source", "").lower()
+                    pct = entry.get("percentage", 0)
+                    if src in renewable_sources:
+                        renewable_pct += pct
+                    else:
+                        fossil_pct += pct
+            # If fuel mix didn't give us renewable/fossil, fall back to static reference
+            if renewable_pct == 0.0 and fossil_pct == 0.0:
+                renewable_pct = static.get("renewable_pct", 0.0)
+                fossil_pct = static.get("fossil_pct", 0.0)
+
             # Store in DB for caching
             db_record = CarbonIntensityRecord(
                 zone=zone,
                 carbon_intensity_gco2_kwh=float(ci),
-                renewable_percentage=static.get("renewable_pct", 0.0),
-                fossil_percentage=static.get("fossil_pct", 0.0),
+                renewable_percentage=renewable_pct,
+                fossil_percentage=fossil_pct,
                 source=source,
                 is_forecast=False,
                 datetime=now,
@@ -310,13 +332,12 @@ class CarbonService:
 
             # Cache in Redis for fast subsequent lookups
             cache_key = f"carbon:intensity:{zone}"
-            fuel_mix_data = live_data.get("fuel_mix", [])
             cache_data = {
                 "zone": zone,
                 "zone_name": static.get("zone_name", zone),
                 "carbon_intensity_gco2_kwh": float(ci),
-                "renewable_percentage": static.get("renewable_pct", 0.0),
-                "fossil_percentage": static.get("fossil_pct", 0.0),
+                "renewable_percentage": renewable_pct,
+                "fossil_percentage": fossil_pct,
                 "fuel_mix": fuel_mix_data,
                 "source": source,
             }
@@ -336,8 +357,8 @@ class CarbonService:
                 zone=zone,
                 zone_name=static.get("zone_name", zone),
                 carbon_intensity_gco2_kwh=float(ci),
-                renewable_percentage=static.get("renewable_pct", 0.0),
-                fossil_percentage=static.get("fossil_pct", 0.0),
+                renewable_percentage=renewable_pct,
+                fossil_percentage=fossil_pct,
                 fuel_mix=fuel_mix,
                 source=source,
                 is_forecast=False,
