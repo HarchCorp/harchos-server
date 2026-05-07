@@ -35,7 +35,7 @@ class CarbonIntensityZoneResponse(BaseModel):
     reading_datetime: datetime = Field(..., alias="datetime", description="Timestamp of the reading")
     updated_at: datetime = Field(..., description="When this data was fetched")
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "populate_by_name": True, "by_alias": True}
 
 
 class CarbonIntensityZoneListResponse(BaseModel):
@@ -187,6 +187,8 @@ class CarbonForecastPoint(BaseModel):
     carbon_intensity_gco2_kwh: float = Field(..., ge=0)
     renewable_percentage: float = Field(..., ge=0, le=100)
     is_green: bool = Field(False, description="Whether this point meets the green threshold")
+
+    model_config = {"populate_by_name": True, "by_alias": True}
 
 
 class CarbonForecastResponse(BaseModel):

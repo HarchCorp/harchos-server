@@ -1505,7 +1505,7 @@ async def list_training_files(
     )
 
 
-@router.post("/estimate", response_model=CostEstimate)
+@router.post("/cost-estimate", response_model=CostEstimate)
 async def estimate_training_cost(
     data: CostEstimateRequest,
     api_key: ApiKey = Depends(require_auth),

@@ -180,6 +180,10 @@ class ResponseCacheMiddleware(BaseHTTPMiddleware):
                     else:
                         body += chunk
 
+                # Handle gzip-compressed responses (from CompressionMiddleware)
+                if response.headers.get("Content-Encoding") == "gzip":
+                    body = gzip.decompress(body)
+
                 body_json = json.loads(body)
 
                 await set_cached_json(

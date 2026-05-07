@@ -235,6 +235,26 @@ async def test_register_duplicate_email(client: AsyncClient, test_user):
 
 
 @pytest.mark.asyncio
+async def test_register_duplicate_email_case_insensitive(client: AsyncClient, test_user):
+    """POST /v1/auth/register rejects duplicate email regardless of casing.
+
+    If a user registered as 'testuser@harchos.ai', attempting to register
+    again as 'TESTUSER@HARCHOS.AI' must still return 409.
+    """
+    response = await client.post(
+        "/v1/auth/register",
+        json={
+            "email": test_user.email.upper(),
+            "name": "Duplicate Upper",
+            "role": "user",
+        },
+    )
+    assert response.status_code == 409
+    data = response.json()
+    assert data["error"]["code"] in ("E0308", "E0309")
+
+
+@pytest.mark.asyncio
 async def test_register_invalid_role(client: AsyncClient):
     """POST /v1/auth/register with invalid role returns error."""
     response = await client.post(

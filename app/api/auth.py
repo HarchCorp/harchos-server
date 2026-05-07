@@ -6,7 +6,7 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -78,7 +78,9 @@ async def create_api_key(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new API key for the authenticated user."""
-    result = await AuthService.create_api_key(db, user_id=api_key.user_id, name=data.name)
+    result = await AuthService.create_api_key(
+        db, user_id=api_key.user_id, name=data.name, tier=api_key.tier,
+    )
 
     audit_log(
         action="create",
@@ -232,14 +234,17 @@ async def register(
             meta={"requested_role": "admin", "allowed_via_register": ["user", "viewer"]},
         )
 
-    # Check if email already exists
-    existing = await db.execute(select(User).where(User.email == data.email))
+    # Check if email already exists (case-insensitive to prevent
+    # Test@Example.COM / test@example.com duplicates)
+    existing = await db.execute(
+        select(User).where(func.lower(User.email) == data.email.lower())
+    )
     if existing.scalar_one_or_none():
         raise already_exists("user", "email")
 
-    # Create user with role
+    # Create user with role — normalize email to lowercase for storage
     user = User(
-        email=data.email,
+        email=data.email.lower(),
         name=data.name,
         is_active=True,
         role=data.role,
@@ -247,9 +252,9 @@ async def register(
     db.add(user)
     await db.flush()
 
-    # Create default API key
+    # Create default API key with standard tier for registered users
     api_key_response = await AuthService.create_api_key(
-        db, user_id=user.id, name="Default API Key"
+        db, user_id=user.id, name="Default API Key", tier="standard",
     )
 
     # Create JWT token
@@ -326,14 +331,16 @@ async def admin_bootstrap(
             detail="Admin user already exists. Bootstrap is a one-time operation. Use the admin panel to manage users.",
         )
 
-    # Check if email already exists
-    existing = await db.execute(select(User).where(User.email == data.email))
+    # Check if email already exists (case-insensitive)
+    existing = await db.execute(
+        select(User).where(func.lower(User.email) == data.email.lower())
+    )
     if existing.scalar_one_or_none():
         raise already_exists("user", "email")
 
-    # Create admin user
+    # Create admin user — normalize email to lowercase for storage
     user = User(
-        email=data.email,
+        email=data.email.lower(),
         name=data.name,
         is_active=True,
         role="admin",

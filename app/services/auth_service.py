@@ -54,7 +54,7 @@ class AuthService:
         name: str,
         *,
         project_id: str | None = None,
-        tier: str = "free",
+        tier: str = "standard",  # Default to 'standard' — 'free' tier is too restrictive for real use
         scopes: list[str] | None = None,
         allowed_models: list[str] | None = None,
         allowed_regions: list[str] | None = None,

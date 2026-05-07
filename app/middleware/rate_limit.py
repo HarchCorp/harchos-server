@@ -100,18 +100,22 @@ def _get_tier_for_key(api_key_obj) -> str:
     if api_key_obj is None:
         return "free"
 
-    # Check for tier metadata on the API key (future: from DB)
+    # Check the tier field on the API key object (set during key creation)
     tier = getattr(api_key_obj, 'tier', None)
     if tier and tier in RATE_LIMIT_TIERS:
         return tier
 
-    # Default: check user role as proxy for tier
+    # Fallback: derive tier from user role if available via relationship
+    # ApiKey doesn't have a user_role column, but the User relationship
+    # may be loaded. Check user.role if the relationship is populated.
     try:
-        role = getattr(api_key_obj, 'user_role', 'viewer')
-        if role == 'admin':
-            return "enterprise"
-        elif role == 'user':
-            return "standard"
+        user = getattr(api_key_obj, 'user', None)
+        if user is not None:
+            role = getattr(user, 'role', None)
+            if role == 'admin':
+                return "enterprise"
+            elif role in ('user', 'viewer'):
+                return "standard"
     except Exception:
         pass
 
@@ -157,6 +161,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     Limits by API key (authenticated) or IP address (unauthenticated).
     Applies different limits for inference vs batch vs general endpoints.
     Adds standard rate limit headers to all responses (Together AI / Groq compatible).
+
+    CRITICAL: This middleware resolves the API key's tier by looking up the key
+    hash in the database. This is necessary because the auth dependency runs
+    AFTER middleware (inside the route handler), so request.state.api_key_obj
+    is not available at middleware time.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -171,31 +180,38 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Determine rate limit key and tier
-        api_key = request.headers.get("X-API-Key") or ""
+        api_key_raw = request.headers.get("X-API-Key") or ""
         auth_header = request.headers.get("Authorization", "")
 
         rate_key = None
-        api_key_obj = None
         tier = "free"
 
-        # Try to get API key object from request state (set by auth middleware)
-        api_key_obj = getattr(request.state, "api_key_obj", None)
-
-        if api_key and api_key.startswith(settings.api_key_prefix):
-            rate_key = f"rl:apikey:{hashlib.sha256(api_key.encode()).hexdigest()[:16]}"
-            tier = _get_tier_for_key(api_key_obj)
+        # Resolve the raw API key value from headers
+        key_to_lookup = None
+        if api_key_raw and api_key_raw.startswith(settings.api_key_prefix):
+            key_to_lookup = api_key_raw
         elif auth_header and "Bearer" in auth_header:
             token = auth_header.replace("Bearer ", "").strip()
             if token.startswith(settings.api_key_prefix):
-                rate_key = f"rl:apikey:{hashlib.sha256(token.encode()).hexdigest()[:16]}"
-                tier = _get_tier_for_key(api_key_obj)
+                key_to_lookup = token
             elif token.startswith(settings.token_prefix):
+                # JWT token — resolve tier by decoding and looking up the API key
+                from app.services.auth_service import AuthService
+                payload = AuthService.verify_jwt_token(token)
+                if payload and payload.get("api_key_id"):
+                    resolved_tier = await self._resolve_tier_from_db(api_key_id=payload["api_key_id"])
+                    tier = resolved_tier
                 rate_key = f"rl:token:{hashlib.sha256(token.encode()).hexdigest()[:16]}"
-                tier = _get_tier_for_key(api_key_obj)
             else:
                 rate_key = f"rl:ip:{_get_client_ip(request)}"
         else:
             rate_key = f"rl:ip:{_get_client_ip(request)}"
+
+        # If we have an API key, look up its tier from DB
+        if key_to_lookup:
+            rate_key = f"rl:apikey:{hashlib.sha256(key_to_lookup.encode()).hexdigest()[:16]}"
+            resolved_tier = await self._resolve_tier_from_key(key_to_lookup)
+            tier = resolved_tier
 
         # Determine limits based on tier and endpoint type
         tier_config = RATE_LIMIT_TIERS.get(tier, RATE_LIMIT_TIERS["free"])
@@ -314,3 +330,100 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _memory_limiter.is_allowed(key, max_requests)
 
         return _memory_limiter.is_allowed(key, max_requests)
+
+    # ------------------------------------------------------------------
+    # Tier resolution methods — look up API key tier from DB
+    # ------------------------------------------------------------------
+
+    # In-memory tier cache to avoid DB lookups on every request
+    _tier_cache: dict[str, tuple[str, float]] = {}  # key_hash -> (tier, timestamp)
+    _TIER_CACHE_TTL = 300  # 5 minutes
+
+    @classmethod
+    async def _resolve_tier_from_key(cls, raw_key: str) -> str:
+        """Look up an API key's tier by hashing the raw key and querying the DB.
+
+        Uses an in-memory tier cache with 5-minute TTL to avoid hitting
+        the database on every single request. This is the same pattern
+        used by Together AI and Groq for rate limit tier resolution.
+        """
+        from app.services.auth_service import AuthService
+        key_hash = AuthService.hash_key(raw_key)
+
+        # Check cache first
+        cached = cls._tier_cache.get(key_hash)
+        if cached:
+            tier, ts = cached
+            if time.time() - ts < cls._TIER_CACHE_TTL:
+                return tier
+
+        # Query DB
+        tier = await cls._query_tier_from_db(key_hash=key_hash)
+
+        # Cache the result
+        cls._tier_cache[key_hash] = (tier, time.time())
+        return tier
+
+    @classmethod
+    async def _resolve_tier_from_db(cls, api_key_id: str) -> str:
+        """Look up an API key's tier by its ID (from JWT payload)."""
+        cache_key = f"id:{api_key_id}"
+        cached = cls._tier_cache.get(cache_key)
+        if cached:
+            tier, ts = cached
+            if time.time() - ts < cls._TIER_CACHE_TTL:
+                return tier
+
+        tier = await cls._query_tier_from_db(api_key_id=api_key_id)
+        cls._tier_cache[cache_key] = (tier, time.time())
+        return tier
+
+    @staticmethod
+    async def _query_tier_from_db(key_hash: str | None = None, api_key_id: str | None = None) -> str:
+        """Query the database for an API key's tier.
+
+        Returns the tier name, or 'standard' as default for authenticated keys.
+        This method does a single DB query and is called at most once per
+        cache TTL window per API key.
+        """
+        try:
+            from app.database import async_session_factory
+            from app.models.api_key import ApiKey
+            from app.models.user import User
+            from sqlalchemy import select
+
+            async with async_session_factory() as db:
+                query = select(ApiKey.tier, ApiKey.user_id).where(ApiKey.is_active.is_(True))
+                if key_hash:
+                    query = query.where(ApiKey.key_hash == key_hash)
+                elif api_key_id:
+                    query = query.where(ApiKey.id == api_key_id)
+                else:
+                    return "standard"
+
+                result = await db.execute(query)
+                row = result.one_or_none()
+
+                if row is None:
+                    return "standard"  # Key not found — default to standard (not free)
+
+                tier, user_id = row
+
+                if tier and tier in RATE_LIMIT_TIERS:
+                    return tier
+
+                # Fallback: check user role to determine tier
+                user_result = await db.execute(select(User.role).where(User.id == user_id))
+                user_role = user_result.scalar_one_or_none()
+                if user_role == "admin":
+                    return "enterprise"
+                elif user_role in ("user", "viewer"):
+                    return "standard"
+
+                return "standard"
+
+        except Exception as e:
+            # Gracefully handle DB errors (table not created yet, connection issues)
+            # Default to "standard" (NOT "free") so authenticated users aren't blocked
+            logger.debug("Rate limit tier lookup failed (DB not ready?): %s", e)
+            return "standard"
