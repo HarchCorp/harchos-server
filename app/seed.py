@@ -250,11 +250,12 @@ async def seed():
             logger.info("Database already seeded. Skipping.")
             return
 
-        # Create default user
+        # Create default user (admin role for full platform access)
         user = User(
             email="admin@harchos.ai",
             name="HarchOS Admin",
             is_active=True,
+            role="admin",
         )
         session.add(user)
         await session.flush()
@@ -267,7 +268,8 @@ async def seed():
 
         api_key = ApiKey(
             user_id=user.id,
-            name="Development Test Key",
+            name="Production Admin Key",
+            tier="enterprise",
             key_hash=key_hash,
             key_prefix=key_prefix,
             is_active=True,

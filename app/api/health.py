@@ -30,6 +30,7 @@ Competitive comparison:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import platform
@@ -159,9 +160,10 @@ async def _check_database() -> ComponentHealth:
         start = time.perf_counter()
         from app.database import engine
         import sqlalchemy
-        async with engine.connect() as conn:
-            result = await conn.execute(sqlalchemy.text("SELECT 1"))
-            result.fetchone()  # ensure data flows back
+        async with asyncio.timeout(5.0):
+            async with engine.connect() as conn:
+                result = await conn.execute(sqlalchemy.text("SELECT 1"))
+                result.fetchone()  # ensure data flows back
         latency = (time.perf_counter() - start) * 1000
 
         # Gather pool stats for PostgreSQL
@@ -202,7 +204,8 @@ async def _check_cache() -> ComponentHealth:
 
         # Measure round-trip latency
         start = time.perf_counter()
-        await cache.get("__health_check__")
+        async with asyncio.timeout(3.0):
+            await cache.get("__health_check__")
         latency = (time.perf_counter() - start) * 1000
 
         # Determine status based on cache type

@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 import httpx
+from pydantic import ValidationError
 from sqlalchemy import select, func, and_, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -158,7 +159,7 @@ class CarbonService:
                             for source, value in production.items():
                                 if value and value > 0:
                                     fuel_mix.append({
-                                        "source": source,
+                                        "fuel_type": source,
                                         "percentage": round(value, 2),
                                     })
                     except Exception:
@@ -238,7 +239,7 @@ class CarbonService:
                 if cached.get("fuel_mix"):
                     try:
                         fuel_mix = [FuelMixEntry(**e) for e in cached["fuel_mix"]]
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, ValidationError):
                         pass
                 return CarbonIntensityZoneResponse(
                     zone=cached["zone"],
@@ -271,7 +272,7 @@ class CarbonService:
                 if record.fuel_mix_json:
                     try:
                         fuel_mix = [FuelMixEntry(**e) for e in json.loads(record.fuel_mix_json)]
-                    except (json.JSONDecodeError, TypeError):
+                    except (json.JSONDecodeError, TypeError, ValidationError):
                         pass
                 return CarbonIntensityZoneResponse(
                     zone=record.zone,
@@ -350,7 +351,7 @@ class CarbonService:
             if fuel_mix_data:
                 try:
                     fuel_mix = [FuelMixEntry(**e) for e in fuel_mix_data]
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, ValidationError):
                     pass
 
             return CarbonIntensityZoneResponse(
@@ -390,12 +391,14 @@ class CarbonService:
         Performance: Uses asyncio.gather for parallel fetching instead of
         sequential loops. Was 21 sequential async ops, now runs in parallel.
         """
-        import asyncio
         zone_codes = list(STATIC_CARBON_DATA.keys())
-        intensities = await asyncio.gather(
-            *[CarbonService.get_zone_intensity(db, zone) for zone in zone_codes]
-        )
-        return CarbonIntensityZoneListResponse(zones=list(intensities), total=len(intensities))
+        # Sequential execution to avoid concurrent AsyncSession usage
+        # (SQLAlchemy async sessions are not safe for asyncio.gather)
+        intensities = []
+        for zone in zone_codes:
+            result = await CarbonService.get_zone_intensity(db, zone)
+            intensities.append(result)
+        return CarbonIntensityZoneListResponse(zones=intensities, total=len(intensities))
 
     # ------------------------------------------------------------------
     # 2. Hub ranking & optimal hub selection
@@ -422,12 +425,12 @@ class CarbonService:
         result = await db.execute(query)
         hubs = result.scalars().all()
 
-        # Fetch all zone intensities concurrently
-        import asyncio
+        # Fetch zone intensities sequentially to avoid concurrent AsyncSession usage
         zones = [_hub_to_zone(hub) for hub in hubs]
-        intensities = await asyncio.gather(
-            *[CarbonService.get_zone_intensity(db, zone) for zone in zones]
-        )
+        intensities = []
+        for zone in zones:
+            result = await CarbonService.get_zone_intensity(db, zone)
+            intensities.append(result)
         
         ranked = []
         for hub, zone, intensity in zip(hubs, zones, intensities):
@@ -517,7 +520,11 @@ class CarbonService:
             green_window = _find_next_green_window(forecast, max_gco2)
             if green_window:
                 action = "defer"
-                defer_hours = max(0.0, (green_window["start"] - now).total_seconds() / 3600)
+                # Parse green_window start (may be ISO string or datetime)
+                gw_start = green_window["start"]
+                if isinstance(gw_start, str):
+                    gw_start = datetime.fromisoformat(gw_start.replace("Z", "+00:00"))
+                defer_hours = max(0.0, (gw_start - now).total_seconds() / 3600)
                 defer_reason = (
                     f"Current carbon intensity at best hub ({best['carbon_intensity_gco2_kwh']:.0f} gCO2/kWh) "
                     f"exceeds threshold ({max_gco2:.0f} gCO2/kWh). "
@@ -745,7 +752,7 @@ class CarbonService:
                             if current_green_start is not None and points:
                                 green_windows.append({
                                     "start": current_green_start.isoformat(),
-                                    "end": points[-1].datetime.isoformat(),
+                                    "end": points[-1].reading_datetime.isoformat(),
                                     "estimated_carbon_intensity_gco2_kwh": GREEN_THRESHOLD_GCO2,
                                 })
 
@@ -797,7 +804,7 @@ class CarbonService:
         if current_green_start is not None and points:
             green_windows.append({
                 "start": current_green_start.isoformat(),
-                "end": points[-1].datetime.isoformat(),
+                "end": points[-1].reading_datetime.isoformat(),
                 "estimated_carbon_intensity_gco2_kwh": GREEN_THRESHOLD_GCO2,
             })
 
@@ -889,17 +896,21 @@ class CarbonService:
             for l in logs
         ]
 
-        # Green windows
-        import asyncio
-        forecasts = await asyncio.gather(
-            *[CarbonService.get_forecast(db, z.zone, hours=12) for z in zones.zones[:5]]
-        )
+        # Green windows — fetch forecasts sequentially to avoid AsyncSession concurrency issues
+        # (get_forecast may use db for cache lookups, so it's not safe for asyncio.gather)
         green_windows = []
-        for zone_resp, forecast in zip(zones.zones[:5], forecasts):
-            for gw in forecast.green_windows:
-                gw["zone"] = zone_resp.zone
-                gw["zone_name"] = zone_resp.zone_name
-                green_windows.append(gw)
+        for zone_resp in zones.zones[:5]:
+            try:
+                forecast = await CarbonService.get_forecast(db, zone_resp.zone, hours=12)
+                for gw in forecast.green_windows:
+                    # Copy to avoid mutating the Pydantic model's internal data
+                    green_windows.append({
+                        **gw,
+                        "zone": zone_resp.zone,
+                        "zone_name": zone_resp.zone_name,
+                    })
+            except Exception as e:
+                logger.warning("Failed to get forecast for zone %s: %s", zone_resp.zone, e)
 
         return CarbonDashboardResponse(
             metrics=metrics,
