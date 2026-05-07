@@ -71,20 +71,21 @@ async def get_db() -> AsyncSession:  # type: ignore[misc]
     """Dependency that yields an async database session.
 
     Automatically commits on success (for mutations) and rolls back on exception.
-    Only commits if the session has pending changes (avoids unnecessary commits
-    on GET requests that don't modify data).
+    Uses a reliable commit detection: always attempt commit if session is active,
+    letting the database handle no-op commits efficiently.
     """
     async with async_session_factory() as session:
         try:
             yield session
-            # Only commit if there are pending changes
-            # This avoids unnecessary commits on read-only GET requests
-            if session.in_transaction() and session.is_active:
-                # Check if any changes were made
-                if session.dirty or session.new or session.deleted:
-                    await session.commit()
+            # Always attempt commit if session is still active.
+            # PostgreSQL handles no-op commits efficiently (no transaction overhead).
+            # This is more reliable than checking dirty/new/deleted which can
+            # miss changes in some edge cases (e.g., after flush()).
+            if session.is_active:
+                await session.commit()
         except Exception:
-            await session.rollback()
+            if session.is_active:
+                await session.rollback()
             raise
         finally:
             await session.close()

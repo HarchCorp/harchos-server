@@ -366,7 +366,7 @@ class AggregateCarbonFootprint(BaseModel):
     )
     items_completed: int = Field(..., description="Number of completed items")
     items_failed: int = Field(..., description="Number of failed items")
-    hub_region: str = Field("Ouarzazate", description="Primary hub region used")
+    hub_region: str = Field("", description="Primary hub region used")
     average_carbon_intensity_gco2_kwh: float = Field(
         0.0, description="Average carbon intensity across items"
     )
@@ -427,10 +427,10 @@ def _estimate_batch_item_carbon(
     model_id: str,
     prompt_tokens: int,
     completion_tokens: int,
-    carbon_intensity_gco2_kwh: float = 47.0,
-    renewable_percentage: float = 81.5,
+    carbon_intensity_gco2_kwh: float = 0.0,  # Real values come from carbon service
+    renewable_percentage: float = 0.0,  # Real values come from carbon service
     gpu_type: str = "H100",
-    hub_region: str = "Ouarzazate",
+    hub_region: str = "",  # Real values come from carbon service
 ) -> CarbonFootprint:
     """Estimate carbon footprint for a single batch inference item.
 
@@ -474,7 +474,7 @@ def _estimate_batch_item_carbon(
 
 def _compute_aggregate_carbon(
     results: list[dict[str, Any]],
-    hub_region: str = "Ouarzazate",
+    hub_region: str = "",  # Real values come from carbon service
 ) -> AggregateCarbonFootprint:
     """Compute aggregate carbon footprint across all batch items."""
     total_gco2 = 0.0
@@ -520,10 +520,10 @@ def _compute_aggregate_carbon(
 
 async def _process_batch_item(
     item: dict[str, Any],
-    carbon_intensity_gco2_kwh: float = 47.0,
-    renewable_percentage: float = 81.5,
+    carbon_intensity_gco2_kwh: float = 0.0,  # Real values come from carbon service
+    renewable_percentage: float = 0.0,  # Real values come from carbon service
     gpu_type: str = "H100",
-    hub_region: str = "Ouarzazate",
+    hub_region: str = "",  # Real values come from carbon service
 ) -> dict[str, Any]:
     """Process a single batch item asynchronously.
 
@@ -652,10 +652,10 @@ async def _process_batch_background(
         batch_row.updated_at = datetime.now(timezone.utc)
         await db.commit()
 
-        # Fetch carbon data (use defaults if service unavailable)
-        carbon_intensity = 47.0
-        renewable_pct = 81.5
-        hub_region = "Ouarzazate"
+        # Fetch carbon data from service (use defaults if service unavailable)
+        carbon_intensity = 0.0
+        renewable_pct = 0.0
+        hub_region = ""
         gpu_type = "H100"
 
         try:
@@ -666,6 +666,7 @@ async def _process_batch_background(
                 if intensity:
                     carbon_intensity = intensity.carbon_intensity_gco2_kwh
                     renewable_pct = intensity.renewable_percentage
+                    hub_region = getattr(intensity, 'zone_name', '') or "Morocco"
         except Exception as exc:
             logger.warning("Could not fetch carbon data for batch %s: %s", batch_id, exc)
 

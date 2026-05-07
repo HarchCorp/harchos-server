@@ -135,12 +135,15 @@ class Settings(BaseSettings):
         return self.environment == "dev"
 
     def get_effective_secret_key(self) -> str:
-        """Get the secret key, generating a dev key if in development mode."""
+        """Get the secret key, generating a secure dev key if in development mode."""
         if self.secret_key:
             return self.secret_key
         if self.is_development:
-            # Auto-generate for dev only — will change on restart
-            return "harchos-dev-secret-key-change-in-production"
+            # Auto-generate a secure random key for dev — changes on each restart
+            # This is intentional: dev sessions don't survive restarts
+            if not hasattr(self, '_dev_secret_key'):
+                self._dev_secret_key = secrets.token_urlsafe(64)
+            return self._dev_secret_key
         # Production without a secret key = fatal error
         raise ValueError(
             "HARCHOS_SECRET_KEY must be set in production! "

@@ -151,10 +151,26 @@ async def list_regions(
 
     # Group hubs by country code
     hub_data_by_country: dict[str, dict] = {}
+    # Proper ISO 3166-1 alpha-2 country code mapping
+    COUNTRY_CODE_MAP = {
+        "morocco": "MA",
+        "algeria": "DZ",
+        "tunisia": "TN",
+        "egypt": "EG",
+        "nigeria": "NG",
+        "kenya": "KE",
+        "south africa": "ZA",
+        "senegal": "SN",
+        "ghana": "GH",
+        "ethiopia": "ET",
+        "ivory coast": "CI",
+        "côte d'ivoire": "CI",
+        "cote d'ivoire": "CI",
+    }
     for hub in hubs:
-        # Derive country code from hub country
+        # Derive country code from hub country — proper ISO mapping
         country = hub.country or "Morocco"
-        code = "MA" if country == "Morocco" else country[:2].upper()
+        code = COUNTRY_CODE_MAP.get(country.lower().strip(), country[:2].upper())
         if code not in hub_data_by_country:
             hub_data_by_country[code] = {
                 "hub_count": 0,

@@ -341,10 +341,10 @@ def _estimate_tokens(text: str) -> int:
 def _estimate_embedding_carbon(
     total_tokens: int,
     num_texts: int,
-    carbon_intensity_gco2_kwh: float = 47.0,
-    renewable_percentage: float = 81.5,
+    carbon_intensity_gco2_kwh: float = 0.0,  # Real values come from carbon service
+    renewable_percentage: float = 0.0,  # Real values come from carbon service
     gpu_type: str = "A100",
-    hub_region: str = "Ouarzazate",
+    hub_region: str = "",  # Real values come from carbon service
 ) -> CarbonFootprintEmbedding:
     """Estimate carbon footprint for an embedding request.
 
@@ -486,6 +486,19 @@ async def list_embedding_models(
     if cached is not None:
         return EmbeddingModelListResponse(**cached)
 
+    # Get real carbon data from service
+    model_carbon_intensity = 0.0
+    model_hub_region = ""
+    try:
+        from app.services.carbon_service import CarbonService
+        from app.database import async_session_factory
+        async with async_session_factory() as carbon_db:
+            ci = await CarbonService.get_zone_intensity(carbon_db, "MA")
+            model_carbon_intensity = ci.carbon_intensity_gco2_kwh
+            model_hub_region = getattr(ci, 'zone_name', '') or "Morocco"
+    except Exception:
+        pass
+
     models = [
         EmbeddingModelInfo(
             id=info["id"],
@@ -497,8 +510,8 @@ async def list_embedding_models(
             max_input_tokens=info["max_input_tokens"],
             description=info["description"],
             pricing_per_1k_tokens=info["pricing_per_1k_tokens"],
-            carbon_intensity_gco2_kwh=47.0,
-            hub_region="Morocco",
+            carbon_intensity_gco2_kwh=model_carbon_intensity,
+            hub_region=model_hub_region,
         )
         for info in EMBEDDING_MODELS.values()
     ]
@@ -574,17 +587,18 @@ async def create_embeddings(
                 )
 
     # Get carbon data for the hub
+    carbon_intensity = 0.0
+    renewable_pct = 0.0
+    hub_region = ""
     try:
         from app.services.carbon_service import CarbonService
         intensity = await CarbonService.get_zone_intensity(db, "MA")
         carbon_intensity = intensity.carbon_intensity_gco2_kwh
         renewable_pct = intensity.renewable_percentage
+        hub_region = getattr(intensity, 'zone_name', '') or "Morocco"
     except Exception:
-        # Fallback to static values if carbon service is unavailable
-        carbon_intensity = 47.0
-        renewable_pct = 81.5
-
-    hub_region = "Ouarzazate"
+        # Fallback: carbon service unavailable
+        pass
     gpu_type = "A100"  # A100 is typical for embedding workloads
 
     # Proxy to inference backend

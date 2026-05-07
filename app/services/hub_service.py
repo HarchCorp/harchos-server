@@ -162,7 +162,7 @@ class HubService:
         from app.models.workload import Workload
         wl_result = await db.execute(
             select(func.count(Workload.id))
-            .where(Workload.hub_id == hub_id, Workload.status.in_("running", "scheduled"))
+            .where(Workload.hub_id == hub_id, Workload.status.in_(["running", "scheduled"]))
         )
         active_wl = wl_result.scalar() or 0
         

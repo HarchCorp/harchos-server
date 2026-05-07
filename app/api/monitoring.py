@@ -81,36 +81,40 @@ async def get_platform_metrics(
 
     Returns GPU utilization, workload counts, energy estimates,
     carbon metrics, and CO2 savings from carbon-aware scheduling.
+
+    Optimized: consolidated from 8 queries to 3 using aggregation.
     """
-    # Hub metrics
-    hub_count_result = await db.execute(select(func.count(Hub.id)))
-    total_hubs = hub_count_result.scalar() or 0
-
-    total_gpus_result = await db.execute(select(func.sum(Hub.total_gpus)))
-    total_gpus = total_gpus_result.scalar() or 0
-
-    available_gpus_result = await db.execute(select(func.sum(Hub.available_gpus)))
-    available_gpus = available_gpus_result.scalar() or 0
-
-    avg_renewable_result = await db.execute(select(func.avg(Hub.renewable_percentage)))
-    avg_renewable = avg_renewable_result.scalar() or 0.0
-
-    avg_carbon_result = await db.execute(select(func.avg(Hub.grid_carbon_intensity)))
-    avg_carbon = avg_carbon_result.scalar() or 0.0
-
-    avg_pue_result = await db.execute(select(func.avg(Hub.pue)))
-    avg_pue = avg_pue_result.scalar() or 1.0
-
-    # Workload metrics
-    total_workloads_result = await db.execute(select(func.count(Workload.id)))
-    total_workloads = total_workloads_result.scalar() or 0
-
-    active_workloads_result = await db.execute(
-        select(func.count(Workload.id)).where(
-            Workload.status.in_(["running", "scheduled"])
+    # Single query for all hub metrics (was 6 separate queries)
+    hub_stats = await db.execute(
+        select(
+            func.count(Hub.id).label("total_hubs"),
+            func.sum(Hub.total_gpus).label("total_gpus"),
+            func.sum(Hub.available_gpus).label("available_gpus"),
+            func.avg(Hub.renewable_percentage).label("avg_renewable"),
+            func.avg(Hub.grid_carbon_intensity).label("avg_carbon"),
+            func.avg(Hub.pue).label("avg_pue"),
         )
     )
-    active_workloads = active_workloads_result.scalar() or 0
+    row = hub_stats.one()
+    total_hubs = row.total_hubs or 0
+    total_gpus = row.total_gpus or 0
+    available_gpus = row.available_gpus or 0
+    avg_renewable = float(row.avg_renewable or 0.0)
+    avg_carbon = float(row.avg_carbon or 0.0)
+    avg_pue = float(row.avg_pue or 1.0)
+
+    # Workload metrics (2 queries combined into 1)
+    wl_stats = await db.execute(
+        select(
+            func.count(Workload.id).label("total_workloads"),
+            func.count(Workload.id).filter(
+                Workload.status.in_(["running", "scheduled"])
+            ).label("active_workloads"),
+        )
+    )
+    wl_row = wl_stats.one()
+    total_workloads = wl_row.total_workloads or 0
+    active_workloads = wl_row.active_workloads or 0
 
     # CO2 savings from carbon optimization logs
     co2_saved_result = await db.execute(
@@ -159,7 +163,7 @@ async def detailed_health_check(
     # Test database connectivity
     db_status = "healthy"
     try:
-        await db.execute(select(1))
+        await db.execute(select(func.now()))
     except Exception:
         db_status = "unhealthy"
 

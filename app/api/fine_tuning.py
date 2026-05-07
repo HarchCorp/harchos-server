@@ -623,10 +623,12 @@ _GPU_POWER_MAP: dict[str, float] = {
     "B200": 1000.0,
 }
 
-# Carbon intensity at Ouarzazate solar hub (gCO2/kWh)
-_DEFAULT_HUB_INTENSITY = 47.0
-_DEFAULT_HUB_RENEWABLE = 81.5
-_DEFAULT_HUB_REGION = "Ouarzazate"
+# Default carbon values — real values come from CarbonService at runtime.
+# These constants are kept only as fallback references and should not be
+# used as primary data sources.
+_DEFAULT_HUB_INTENSITY = 0.0  # Real values come from carbon service
+_DEFAULT_HUB_RENEWABLE = 0.0  # Real values come from carbon service
+_DEFAULT_HUB_REGION = ""  # Real values come from carbon service
 _DEFAULT_GPU_TYPE = "H100"
 _COST_PER_GPU_HOUR = 2.50  # USD per GPU-hour (HarchOS pricing)
 
@@ -635,7 +637,7 @@ def _estimate_training_carbon(
     model_info: dict[str, Any],
     n_epochs: int,
     method: FineTuningMethod,
-    carbon_intensity_gco2_kwh: float = _DEFAULT_HUB_INTENSITY,
+    carbon_intensity_gco2_kwh: float = 0.0,  # Real values come from carbon service
 ) -> tuple[float, float]:
     """Estimate carbon emissions for a training run.
 
@@ -666,7 +668,7 @@ def _compute_cost_estimate(
     n_epochs: int,
     method: FineTuningMethod,
     carbon_budget: CarbonBudget | None = None,
-    carbon_intensity_gco2_kwh: float = _DEFAULT_HUB_INTENSITY,
+    carbon_intensity_gco2_kwh: float = 0.0,  # Real values come from carbon service
 ) -> CostEstimate:
     """Compute a full cost estimate for a fine-tuning job."""
     base_gpu_hours_per_epoch = model_info.get("gpu_hours_per_epoch_estimate", 1.0)
@@ -707,7 +709,7 @@ def _build_carbon_tracking(
     carbon_budget: CarbonBudget | None = None,
 ) -> CarbonTracking:
     """Build the initial carbon tracking object for a job."""
-    carbon_intensity = carbon_budget.carbon_intensity_gco2_kwh if carbon_budget and carbon_budget.carbon_intensity_gco2_kwh else _DEFAULT_HUB_INTENSITY
+    carbon_intensity = carbon_budget.carbon_intensity_gco2_kwh if carbon_budget and carbon_budget.carbon_intensity_gco2_kwh else 0.0
     estimated_carbon, carbon_per_epoch = _estimate_training_carbon(
         model_info, n_epochs, method, carbon_intensity
     )
@@ -730,8 +732,8 @@ def _build_carbon_tracking(
         estimated_carbon_per_epoch_grams=round(carbon_per_epoch, 2),
         actual_carbon_grams=0.0,
         carbon_intensity_gco2_kwh=carbon_intensity,
-        renewable_percentage=_DEFAULT_HUB_RENEWABLE,
-        hub_region=_DEFAULT_HUB_REGION,
+        renewable_percentage=0.0,  # Real values come from carbon service
+        hub_region="",  # Real values come from carbon service
         gpu_type=_DEFAULT_GPU_TYPE,
         carbon_saved_vs_average_grams=round(carbon_saved, 2),
     )
@@ -1110,7 +1112,7 @@ async def create_fine_tuning_job(
     carbon_intensity = (
         data.carbon_budget.carbon_intensity_gco2_kwh
         if data.carbon_budget and data.carbon_budget.carbon_intensity_gco2_kwh
-        else _DEFAULT_HUB_INTENSITY
+        else 0.0  # Real values come from carbon service
     )
     cost_estimate = _compute_cost_estimate(
         model_info, data.hyperparameters.n_epochs, data.method, data.carbon_budget, carbon_intensity
@@ -1521,7 +1523,7 @@ async def estimate_training_cost(
     carbon_intensity = (
         data.carbon_budget.carbon_intensity_gco2_kwh
         if data.carbon_budget and data.carbon_budget.carbon_intensity_gco2_kwh
-        else _DEFAULT_HUB_INTENSITY
+        else 0.0  # Real values come from carbon service
     )
 
     estimate = _compute_cost_estimate(

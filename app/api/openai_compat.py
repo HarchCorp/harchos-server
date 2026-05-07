@@ -148,8 +148,13 @@ class CarbonFootprint(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _estimate_carbon(model_id: str, prompt_tokens: int, completion_tokens: int,
-                     ci_gco2_kwh: float = 47.0, renewable_pct: float = 81.5) -> CarbonFootprint:
-    """Estimate carbon footprint for inference."""
+                     ci_gco2_kwh: float = 0.0, renewable_pct: float = 0.0,
+                     hub_region: str = "") -> CarbonFootprint:
+    """Estimate carbon footprint for inference.
+
+    Real carbon values come from CarbonService; defaults of 0.0/"" are
+    placeholders when the service is unavailable.
+    """
     gpu_power_w = 700  # H100
     inference_seconds = max(0.5, (prompt_tokens / 5000) + (completion_tokens / 100))
     energy_kwh = (gpu_power_w * inference_seconds) / (1000 * 3600)
@@ -157,7 +162,7 @@ def _estimate_carbon(model_id: str, prompt_tokens: int, completion_tokens: int,
     avg_gco2 = energy_kwh * 500 * 1000
     return CarbonFootprint(
         gco2_per_request=round(gco2, 4),
-        hub_region="Ouarzazate",
+        hub_region=hub_region,
         carbon_intensity_gco2_kwh=ci_gco2_kwh,
         renewable_percentage=renewable_pct,
         gpu_type="H100",
@@ -252,10 +257,17 @@ async def chat_completions(
     await check_spending_limit(api_key, estimated_cost)
 
     # Get carbon data
-    from app.services.carbon_service import CarbonService
-    intensity = await CarbonService.get_zone_intensity(db, "MA")
-    ci = intensity.carbon_intensity_gco2_kwh
-    renewable = intensity.renewable_percentage
+    ci = 0.0
+    renewable = 0.0
+    hub_region = ""
+    try:
+        from app.services.carbon_service import CarbonService
+        intensity = await CarbonService.get_zone_intensity(db, "MA")
+        ci = intensity.carbon_intensity_gco2_kwh
+        renewable = intensity.renewable_percentage
+        hub_region = getattr(intensity, 'zone_name', '') or "Morocco"
+    except Exception:
+        pass
 
     # Check for configured backend
     backend_url = getattr(settings, "inference_backend_url", "")
@@ -294,7 +306,7 @@ async def chat_completions(
                             elif line == "data: [DONE]":
                                 # Inject carbon data before DONE
                                 elapsed = time.time() - start_time
-                                carbon = _estimate_carbon(request.model, 0, 0, ci, renewable)
+                                carbon = _estimate_carbon(request.model, 0, 0, ci, renewable, hub_region)
                                 carbon.inference_duration_seconds = round(elapsed, 3)
                                 carbon_chunk = {
                                     "object": "carbon_footprint",
@@ -326,7 +338,7 @@ async def chat_completions(
                 prompt_tokens = usage.get("prompt_tokens", 0) or 0
                 completion_tokens = usage.get("completion_tokens", 0) or 0
 
-                carbon = _estimate_carbon(request.model, prompt_tokens, completion_tokens, ci, renewable)
+                carbon = _estimate_carbon(request.model, prompt_tokens, completion_tokens, ci, renewable, hub_region)
                 carbon.inference_duration_seconds = round(elapsed, 3)
                 resp_data["carbon_footprint"] = carbon.model_dump()
 
@@ -358,10 +370,17 @@ async def completions(
     await check_model_access(api_key, request.model)
 
     # Get carbon data
-    from app.services.carbon_service import CarbonService
-    intensity = await CarbonService.get_zone_intensity(db, "MA")
-    ci = intensity.carbon_intensity_gco2_kwh
-    renewable = intensity.renewable_percentage
+    ci = 0.0
+    renewable = 0.0
+    hub_region = ""
+    try:
+        from app.services.carbon_service import CarbonService
+        intensity = await CarbonService.get_zone_intensity(db, "MA")
+        ci = intensity.carbon_intensity_gco2_kwh
+        renewable = intensity.renewable_percentage
+        hub_region = getattr(intensity, 'zone_name', '') or "Morocco"
+    except Exception:
+        pass
 
     # Check for configured backend
     backend_url = getattr(settings, "inference_backend_url", "")
@@ -399,7 +418,7 @@ async def completions(
             prompt_tokens = usage.get("prompt_tokens", 0) or 0
             completion_tokens = usage.get("completion_tokens", 0) or 0
 
-            carbon = _estimate_carbon(request.model, prompt_tokens, completion_tokens, ci, renewable)
+            carbon = _estimate_carbon(request.model, prompt_tokens, completion_tokens, ci, renewable, hub_region)
             carbon.inference_duration_seconds = round(elapsed, 3)
             resp_data["carbon_footprint"] = carbon.model_dump()
 
@@ -464,7 +483,8 @@ async def embeddings(
 
             from app.services.carbon_service import CarbonService
             intensity = await CarbonService.get_zone_intensity(db, "MA")
-            carbon = _estimate_carbon(request.model, total_tokens, 0, intensity.carbon_intensity_gco2_kwh, intensity.renewable_percentage)
+            emb_hub_region = getattr(intensity, 'zone_name', '') or "Morocco"
+            carbon = _estimate_carbon(request.model, total_tokens, 0, intensity.carbon_intensity_gco2_kwh, intensity.renewable_percentage, emb_hub_region)
             carbon.inference_duration_seconds = round(elapsed, 3)
             resp_data["carbon_footprint"] = carbon.model_dump()
 

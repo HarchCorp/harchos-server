@@ -1,6 +1,7 @@
 """Auth endpoints – API key management, token exchange, user info, registration, key revocation."""
 
 import hashlib
+import hmac
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -311,7 +312,7 @@ async def admin_bootstrap(
             detail="Admin bootstrap is not configured. Set HARCHOS_ADMIN_BOOTSTRAP_TOKEN to enable one-time admin setup.",
         )
 
-    if data.bootstrap_token != bootstrap_token:
+    if not hmac.compare_digest(data.bootstrap_token, bootstrap_token):
         raise HarchOSError("E0101", detail="Invalid bootstrap token")
 
     # Check if any admin already exists

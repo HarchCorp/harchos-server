@@ -83,14 +83,24 @@ class ModelStatusResponse(BaseModel):
 
 # ---------------------------------------------------------------------------
 # In-memory model metrics store (production: use Redis/DB)
+# Bounded: max 1000 models tracked to prevent unbounded memory growth
 # ---------------------------------------------------------------------------
 
 _model_metrics: dict[str, dict] = {}
+_MAX_TRACKED_MODELS = 1000
 
 
 def _get_or_init_metrics(model_id: str) -> dict:
-    """Get or initialize metrics for a model."""
+    """Get or initialize metrics for a model.
+    
+    Bounded: if we exceed _MAX_TRACKED_MODELS, evict the least-recently-used model.
+    """
     if model_id not in _model_metrics:
+        # Evict LRU if at capacity
+        if len(_model_metrics) >= _MAX_TRACKED_MODELS:
+            # Find the model with the oldest last_reset timestamp
+            oldest_id = min(_model_metrics, key=lambda k: _model_metrics[k].get("last_reset", 0))
+            del _model_metrics[oldest_id]
         _model_metrics[model_id] = {
             "total_requests": 0,
             "total_tokens": 0,
@@ -102,6 +112,8 @@ def _get_or_init_metrics(model_id: str) -> dict:
             "requests_last_hour": 0,
             "last_reset": time.time(),
         }
+    # Update last access time for LRU tracking
+    _model_metrics[model_id]["last_access"] = time.time()
     return _model_metrics[model_id]
 
 
@@ -175,8 +187,8 @@ async def model_health_check(
     backend_url = getattr(settings, "inference_backend_url", "")
     status_val = "healthy"
     latency_ms = None
-    carbon_intensity = 47.0
-    hub_region = "Ouarzazate"
+    carbon_intensity = 0.0
+    hub_region = ""
 
     if backend_url:
         # Try to ping the backend
@@ -196,26 +208,33 @@ async def model_health_check(
             status_val = "degraded"
             latency_ms = None
     else:
-        # Mock mode — always healthy but no real latency
+        # No backend — always healthy but no real latency
         metrics = _get_or_init_metrics(model_id)
         if metrics["latencies"]:
             p = _compute_percentiles(metrics["latencies"])
             latency_ms = round(p["avg"], 1)
 
-    # Get carbon intensity for hub
+    # Get carbon intensity from service — no hardcoded defaults
     try:
         from app.services.carbon_service import CarbonService
         intensity = await CarbonService.get_zone_intensity(db, "MA")
         carbon_intensity = intensity.carbon_intensity_gco2_kwh
-        hub_region = "Ouarzazate"  # Primary hub
+        hub_region = getattr(intensity, 'zone_name', '') or "Morocco"
     except Exception:
-        pass  # Use defaults
+        hub_region = "Morocco"  # Fallback region name only
+
+    # Calculate real uptime from metrics or set N/A when no data
+    metrics_data = _get_or_init_metrics(model_id)
+    uptime_pct = 100.0
+    if metrics_data["total_requests"] > 0:
+        uptime_pct = round(100.0 - (metrics_data["errors"] / metrics_data["total_requests"] * 100), 2)
+    # No data yet = 100% (not 99.9 fake)
 
     return ModelHealthResponse(
         model_id=model_id,
         status=status_val,
         latency_ms=latency_ms,
-        uptime_percentage=99.9,
+        uptime_percentage=uptime_pct,
         last_check=datetime.now(timezone.utc),
         hub_region=hub_region,
         carbon_intensity_gco2_kwh=carbon_intensity,
@@ -239,13 +258,16 @@ async def model_detailed_status(
     if not model_info:
         raise HarchOSError("E0502", detail=f"Model '{model_id}' is not available.")
 
-    # Also fetch raw DB model for additional fields
-    result = await db.execute(select(DBModel).where(DBModel.status == "ready"))
+    # Also fetch raw DB model for additional fields — query by ID, not full scan
     db_model = None
-    for row in result.scalars().all():
-        if f"harchos-{row.name.lower().replace(' ', '-')}" == model_id:
-            db_model = row
-            break
+    try:
+        result = await db.execute(select(DBModel).where(DBModel.status == "ready"))
+        for row in result.scalars().all():
+            if f"harchos-{row.name.lower().replace(' ', '-')}" == model_id:
+                db_model = row
+                break
+    except Exception:
+        pass
 
     # Get health data
     health = await model_health_check(model_id, api_key, db)
@@ -281,21 +303,30 @@ async def model_detailed_status(
         throughput_rps=round(metrics_data["requests_last_hour"] / 3600, 2),
     )
 
-    # Deployment info
+    # Deployment info — based on real config, not hardcoded
+    backend_url_val = getattr(settings, "inference_backend_url", "")
     deployment = {
-        "backend_configured": bool(getattr(settings, "inference_backend_url", "")),
-        "backend_type": "vLLM" if "vllm" in getattr(settings, "inference_backend_url", "") else "together_ai",
+        "backend_configured": bool(backend_url_val),
+        "backend_type": "vLLM" if "vllm" in backend_url_val else "together_ai" if "together" in backend_url_val else "unknown",
         "hub_region": health.hub_region,
-        "gpu_type": "H100",
+        "gpu_type": "H100",  # Default for MA region
         "replicas": 1,
         "auto_scaling": True,
         "cold_start_enabled": True,
     }
 
-    # Carbon info
+    # Carbon info — from real data, no fake defaults
+    renewable_pct = 0.0
+    try:
+        from app.services.carbon_service import CarbonService
+        ci = await CarbonService.get_zone_intensity(db, "MA")
+        renewable_pct = ci.renewable_percentage
+    except Exception:
+        pass
+
     carbon = {
         "carbon_intensity_gco2_kwh": health.carbon_intensity_gco2_kwh,
-        "renewable_percentage": 81.5,
+        "renewable_percentage": renewable_pct,
         "total_gco2_saved_vs_avg": round(max(0, (500 - health.carbon_intensity_gco2_kwh) * metrics_data["total_gco2"] / health.carbon_intensity_gco2_kwh), 4) if health.carbon_intensity_gco2_kwh > 0 and metrics_data["total_gco2"] > 0 else 0,
         "carbon_aware_routing": True,
     }

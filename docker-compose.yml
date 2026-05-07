@@ -6,13 +6,15 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - HARCHOS_DATABASE_URL=postgresql+asyncpg://harchos:harchos@postgres:5432/harchos
-      - HARCHOS_SECRET_KEY=dev-secret-key-change-in-production
+      # All vars use HARCHOS_ prefix — override in production with real values
+      - HARCHOS_DATABASE_URL=postgresql+asyncpg://harchos:changeme@postgres:5432/harchos
+      - HARCHOS_SECRET_KEY=${HARCHOS_SECRET_KEY:-}  # MUST be set for production
       - HARCHOS_DEBUG=true
       - HARCHOS_ENVIRONMENT=dev
-      - HARCHOS_ELECTRICITY_MAPS_API_KEY=
-      - HARCHOS_UPSTASH_REDIS_URL=
-      - HARCHOS_UPSTASH_REDIS_TOKEN=
+      - HARCHOS_ELECTRICITY_MAPS_API_KEY=${HARCHOS_ELECTRICITY_MAPS_API_KEY:-}
+      - HARCHOS_UPSTASH_REDIS_URL=${HARCHOS_UPSTASH_REDIS_URL:-}
+      - HARCHOS_UPSTASH_REDIS_TOKEN=${HARCHOS_UPSTASH_REDIS_TOKEN:-}
+      - HARCHOS_REDIS_URL=redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
@@ -21,8 +23,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: harchos
-      POSTGRES_PASSWORD: harchos
+      # Default dev credentials — override POSTGRES_PASSWORD in production
+      POSTGRES_USER: ${POSTGRES_USER:-harchos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: harchos
     ports:
       - "5432:5432"

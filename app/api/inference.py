@@ -22,7 +22,7 @@ from typing import AsyncIterator
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -178,16 +178,18 @@ def _estimate_inference_carbon(
     model_id: str,
     prompt_tokens: int,
     completion_tokens: int,
-    carbon_intensity_gco2_kwh: float = 47.0,
-    renewable_percentage: float = 81.5,
+    carbon_intensity_gco2_kwh: float = 0.0,
+    renewable_percentage: float = 0.0,
     gpu_type: str = "H100",
-    hub_region: str = "Ouarzazate",
+    hub_region: str = "",
 ) -> CarbonFootprint:
     """Estimate carbon footprint for an inference request.
 
     Based on: GPU power × inference time × carbon intensity / 1000
     H100 TDP: 700W, A100 TDP: 400W
     Inference time ≈ (prompt_tokens / 5000 + completion_tokens / 100) seconds
+
+    Carbon data MUST come from the carbon service — no hardcoded defaults.
     """
     gpu_power_w = {"H100": 700, "A100": 400, "L40S": 350, "H200": 800, "B200": 1000}.get(gpu_type, 500)
 
@@ -229,16 +231,29 @@ async def _get_models_from_db(db: AsyncSession) -> list[ModelInfo]:
     Used as fallback when no inference backend is configured.
     """
     from app.models.model import Model as DBModel
+    from app.models.hub import Hub
     result = await db.execute(select(DBModel).where(DBModel.status == "ready"))
     db_models = result.scalars().all()
+
+    # Get carbon data from the carbon service for accurate values
+    carbon_intensity = 0.0
+    hub_region = ""
+    try:
+        from app.services.carbon_service import CarbonService
+        intensity = await CarbonService.get_zone_intensity(db, "MA")
+        carbon_intensity = intensity.carbon_intensity_gco2_kwh
+        hub_region = intensity.zone_name or "Morocco"
+    except Exception:
+        # If carbon service fails, leave as 0 — no fake data
+        pass
 
     return [
         ModelInfo(
             id=f"harchos-{m.name.lower().replace(' ', '-')}",
             created=int(m.created_at.timestamp()) if m.created_at else 1700000000,
             owned_by="harchos",
-            carbon_intensity_gco2_kwh=47.0,
-            hub_region="Morocco",
+            carbon_intensity_gco2_kwh=carbon_intensity,
+            hub_region=hub_region,
             family=m.framework or "",
             parameter_count_b=0,
         )
@@ -322,13 +337,23 @@ async def list_inference_models(
                 if resp.status_code == 200:
                     backend_data = resp.json()
                     backend_models = backend_data.get("data", [])
+                    # Get carbon data from service — no hardcoded values
+                    carbon_intensity = 0.0
+                    hub_region_name = ""
+                    try:
+                        from app.services.carbon_service import CarbonService
+                        ci = await CarbonService.get_zone_intensity(db, "MA")
+                        carbon_intensity = ci.carbon_intensity_gco2_kwh
+                        hub_region_name = ci.zone_name or "Morocco"
+                    except Exception:
+                        pass
                     models = [
                         ModelInfo(
                             id=m.get("id", ""),
                             created=m.get("created", 1700000000),
                             owned_by="harchos",
-                            carbon_intensity_gco2_kwh=47.0,
-                            hub_region="Morocco",
+                            carbon_intensity_gco2_kwh=carbon_intensity,
+                            hub_region=hub_region_name,
                             family="",
                             parameter_count_b=0,
                         )
@@ -382,12 +407,13 @@ async def chat_completions(
     estimated_cost = (prompt_tokens_est + completion_tokens_est) / 1000 * 0.002
     await check_spending_limit(api_key, estimated_cost)
 
-    # Get carbon data for the greenest hub
+    # Get carbon data for the greenest hub — use real data, never hardcoded
     from app.services.carbon_service import CarbonService
     intensity = await CarbonService.get_zone_intensity(db, "MA")
 
-    hub_region = "Ouarzazate"
-    gpu_type = "H100"
+    # Derive hub region and GPU type from the hub data
+    hub_region = intensity.zone_name if hasattr(intensity, 'zone_name') and intensity.zone_name else "Morocco"
+    gpu_type = "H100"  # Default GPU type for MA hubs
 
     # Require inference backend — no mock mode
     backend_url = getattr(settings, "inference_backend_url", "")
@@ -475,8 +501,9 @@ async def completions(
     from app.services.carbon_service import CarbonService
     intensity = await CarbonService.get_zone_intensity(db, "MA")
 
-    hub_region = "Ouarzazate"
-    gpu_type = "H100"
+    # Derive hub region from carbon data — never hardcoded
+    hub_region = intensity.zone_name if hasattr(intensity, 'zone_name') and intensity.zone_name else "Morocco"
+    gpu_type = "H100"  # Default GPU type for MA hubs
 
     # Proxy to real backend
     request_body = request.model_dump(exclude={"carbon_aware", "carbon_preference"})
@@ -578,5 +605,4 @@ async def _stream_backend_response(
     )
 
 
-# Need JSONResponse import
-from fastapi.responses import JSONResponse
+# JSONResponse already imported at top of file
