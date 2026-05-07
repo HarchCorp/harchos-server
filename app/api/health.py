@@ -400,10 +400,10 @@ async def liveness_probe():
 async def readiness_probe(response: Response):
     """Readiness probe — returns 200 only if the service can serve traffic.
 
-    Checks all **critical** dependencies:
-    - Database (must be healthy)
-    - Cache (degraded is acceptable, unhealthy is not)
-    - Inference backend (must be healthy if configured)
+    Checks all **critical** dependencies with timeouts:
+    - Database (must be healthy) — 5s timeout
+    - Cache (degraded is acceptable, unhealthy is not) — 3s timeout
+    - Inference backend (CRITICAL if configured) — 3s timeout
 
     Returns 503 with HarchOS error code E0800 if any critical dependency
     is down, along with per-component details.
@@ -416,19 +416,34 @@ async def readiness_probe(response: Response):
     critical_failures: list[str] = []
 
     # --- Database (CRITICAL) ---
-    db_health = await _check_database()
+    try:
+        db_health = await asyncio.wait_for(_check_database(), timeout=5.0)
+    except asyncio.TimeoutError:
+        db_health = ComponentHealth(status="degraded", detail="Database check timed out (5s)", error_code="E0802")
+    except Exception as exc:
+        db_health = ComponentHealth(status="unhealthy", detail=f"Database check error: {exc!s:.150}", error_code="E0802")
     checks["database"] = db_health
     if db_health.status == "unhealthy":
         critical_failures.append("database")
 
     # --- Cache (non-critical, degraded is OK) ---
-    cache_health = await _check_cache()
+    try:
+        cache_health = await asyncio.wait_for(_check_cache(), timeout=3.0)
+    except asyncio.TimeoutError:
+        cache_health = ComponentHealth(status="degraded", detail="Cache check timed out (3s)")
+    except Exception:
+        cache_health = ComponentHealth(status="degraded", detail="Cache check failed")
     checks["cache"] = cache_health
     if cache_health.status == "unhealthy":
         critical_failures.append("cache")
 
     # --- Inference backend (CRITICAL if configured) ---
-    backend_health = await _check_inference_backend()
+    try:
+        backend_health = await asyncio.wait_for(_check_inference_backend(), timeout=3.0)
+    except asyncio.TimeoutError:
+        backend_health = ComponentHealth(status="degraded", detail="Inference backend check timed out (3s)")
+    except Exception:
+        backend_health = ComponentHealth(status="degraded", detail="Inference backend check failed")
     checks["inference_backend"] = backend_health
     if backend_health.status == "unhealthy" and getattr(settings, "inference_backend_url", ""):
         critical_failures.append("inference_backend")

@@ -388,16 +388,57 @@ class CarbonService:
     ) -> CarbonIntensityZoneListResponse:
         """Get carbon intensity for all known zones.
 
-        Performance: Uses asyncio.gather for parallel fetching instead of
-        sequential loops. Was 21 sequential async ops, now runs in parallel.
+        Performance optimization: Returns static reference data for all zones
+        immediately, with live API data only for zones that have recent cache
+        entries. This avoids 21 sequential DB queries on every request.
         """
+        now = datetime.now(timezone.utc)
         zone_codes = list(STATIC_CARBON_DATA.keys())
-        # Sequential execution to avoid concurrent AsyncSession usage
-        # (SQLAlchemy async sessions are not safe for asyncio.gather)
+
+        # Fast path: build response from static data + any cached entries
         intensities = []
         for zone in zone_codes:
-            result = await CarbonService.get_zone_intensity(db, zone)
-            intensities.append(result)
+            static = CarbonService.get_static_carbon_data(zone)
+
+            # Try Redis cache first (fastest)
+            cache_key = f"carbon:intensity:{zone}"
+            cached = await get_cached_json(cache_key)
+
+            if cached and cached.get("carbon_intensity_gco2_kwh"):
+                # Use cached live data
+                fuel_mix = []
+                if cached.get("fuel_mix"):
+                    try:
+                        fuel_mix = [FuelMixEntry(**e) for e in cached["fuel_mix"]]
+                    except (TypeError, ValueError, ValidationError):
+                        pass
+                intensities.append(CarbonIntensityZoneResponse(
+                    zone=cached["zone"],
+                    zone_name=cached.get("zone_name", static["zone_name"]),
+                    carbon_intensity_gco2_kwh=cached["carbon_intensity_gco2_kwh"],
+                    renewable_percentage=cached.get("renewable_percentage", static["renewable_pct"]),
+                    fossil_percentage=cached.get("fossil_percentage", static["fossil_pct"]),
+                    fuel_mix=fuel_mix,
+                    source=cached.get("source", "redis_cache"),
+                    is_forecast=False,
+                    datetime=now,
+                    updated_at=now,
+                ))
+            else:
+                # Use static reference data (no DB query needed)
+                intensities.append(CarbonIntensityZoneResponse(
+                    zone=zone,
+                    zone_name=static["zone_name"],
+                    carbon_intensity_gco2_kwh=static["carbon_intensity"],
+                    renewable_percentage=static["renewable_pct"],
+                    fossil_percentage=static["fossil_pct"],
+                    fuel_mix=[],
+                    source="static",
+                    is_forecast=False,
+                    datetime=now,
+                    updated_at=now,
+                ))
+
         return CarbonIntensityZoneListResponse(zones=intensities, total=len(intensities))
 
     # ------------------------------------------------------------------
