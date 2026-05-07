@@ -18,5 +18,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import httpx; r = httpx.get('http://localhost:8000/v1/health'); assert r.status_code == 200" || exit 1
 
 # Use shell form so PORT env var gets expanded by the shell
-CMD sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}'
+CMD sh -c "echo HarchOS v0.7.0 starting... CMD sh -cCMD sh -c " 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}'
 
+# Build v2 - Thu May  7 17:38:28 UTC 2026
