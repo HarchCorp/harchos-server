@@ -260,7 +260,8 @@ async def seed():
         await session.flush()
 
         # Create default API key
-        test_key = settings.default_api_key or AuthService.generate_api_key()
+        # Use a fixed key for predictable testing if no env override is set
+        test_key = settings.default_api_key or "hsk_prod_e2e_test_2026_morocco"
         key_hash = hashlib.sha256(test_key.encode()).hexdigest()
         key_prefix = test_key[:8]
 
