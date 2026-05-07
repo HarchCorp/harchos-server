@@ -1,15 +1,16 @@
-"""Prometheus metrics middleware for request tracking.
+"""Prometheus metrics middleware — pure ASGI for zero overhead.
 
 Collects HTTP request duration, request counts, and carbon metrics.
 Exposes /v1/metrics endpoint for Prometheus scraping.
+
+v2: Converted from BaseHTTPMiddleware to pure ASGI to eliminate
+body_iterator consumption and task spawning overhead.
 """
 
 import time
 import logging
-from typing import Callable
 
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from starlette.responses import Response as StarletteResponse
 
@@ -19,7 +20,6 @@ logger = logging.getLogger("harchos.metrics")
 # Prometheus metrics definitions
 # ---------------------------------------------------------------------------
 
-# Request metrics
 REQUEST_COUNT = Counter(
     "harchos_http_requests_total",
     "Total count of HTTP requests",
@@ -54,7 +54,7 @@ CARBON_SAVED_KG_TOTAL = Counter(
 WORKLOADS_OPTIMIZED_TOTAL = Counter(
     "harchos_workloads_optimized_total",
     "Total workloads optimized by carbon-aware scheduling",
-    ["action"],  # schedule_now, defer, reject
+    ["action"],
 )
 
 # Inference metrics
@@ -80,7 +80,7 @@ INFERENCE_CARBON_GCO2_TOTAL = Counter(
 INFERENCE_TOKENS_TOTAL = Counter(
     "harchos_inference_tokens_total",
     "Total tokens processed",
-    ["model", "type"],  # type: prompt or completion
+    ["model", "type"],
 )
 
 # Platform metrics
@@ -103,28 +103,38 @@ HUB_RENEWABLE_PERCENTAGE = Gauge(
 )
 
 
-class MetricsMiddleware(BaseHTTPMiddleware):
-    """Middleware that collects Prometheus metrics for every HTTP request."""
+class MetricsMiddleware:
+    """Middleware that collects Prometheus metrics — pure ASGI."""
 
-    async def dispatch(self, request: Request, call_next: Callable) -> StarletteResponse:
-        # Skip metrics endpoint itself to avoid recursion
-        path = request.url.path
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
         if path == "/v1/metrics":
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
-        method = request.method
-        
-        # Normalize endpoint path for cardinality control
+        method = scope.get("method", "GET")
         endpoint = self._normalize_endpoint(path)
 
-        # Track in-progress requests
         REQUESTS_IN_PROGRESS.labels(method=method, endpoint=endpoint).inc()
-
         start_time = time.perf_counter()
+        status_code = 0
+
+        async def send_with_metrics(message: dict) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 0)
+            await send(message)
+
         try:
-            response = await call_next(request)
-            status_code = response.status_code
-        except Exception as exc:
+            await self.app(scope, receive, send_with_metrics)
+        except Exception:
             status_code = 500
             raise
         finally:
@@ -135,14 +145,9 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             ).inc()
             REQUEST_DURATION.labels(method=method, endpoint=endpoint).observe(duration)
 
-        return response
-
     @staticmethod
     def _normalize_endpoint(path: str) -> str:
-        """Normalize endpoint path to reduce cardinality.
-
-        Replace UUIDs and numeric IDs with placeholders.
-        """
+        """Normalize endpoint path to reduce cardinality."""
         parts = path.rstrip("/").split("/")
         normalized = []
         for part in parts:

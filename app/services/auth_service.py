@@ -148,5 +148,6 @@ class AuthService:
             email=user.email,
             name=user.name,
             is_active=user.is_active,
+            role=user.role,
             created_at=user.created_at,
         )

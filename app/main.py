@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import settings
 from app.database import init_db, close_db
@@ -60,69 +60,103 @@ def is_startup_complete() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Timing middleware — adds X-Process-Time header to every response
+# Timing middleware — adds X-Process-Time header to every response (pure ASGI)
 # ---------------------------------------------------------------------------
 
-class ProcessTimeMiddleware(BaseHTTPMiddleware):
-    """Add X-Process-Time-ms header to all responses for latency monitoring."""
+class ProcessTimeMiddleware:
+    """Add X-Process-Time-ms header to all responses — pure ASGI."""
 
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
         start = time.perf_counter()
-        response = await call_next(request)
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        response.headers["X-Process-Time-ms"] = f"{elapsed_ms:.1f}"
-        response.headers["Server"] = "HarchOS"
-        return response
+
+        async def send_with_timing(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                headers_list = list(message.get("headers", []))
+                headers_list.append([b"x-process-time-ms", f"{elapsed_ms:.1f}".encode()])
+                headers_list.append([b"server", b"HarchOS"])
+                message["headers"] = headers_list
+            await send(message)
+
+        await self.app(scope, receive, send_with_timing)
 
 
 # ---------------------------------------------------------------------------
-# Security headers middleware
+# Security headers middleware (pure ASGI)
 # ---------------------------------------------------------------------------
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Add security headers to all responses."""
+class SecurityHeadersMiddleware:
+    """Add security headers to all responses — pure ASGI."""
 
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        if settings.enable_security_headers:
-            response.headers["X-Content-Type-Options"] = "nosniff"
-            response.headers["X-Frame-Options"] = "DENY"
-            response.headers["X-XSS-Protection"] = "1; mode=block"
-            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-            response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-            response.headers["X-HarchOS-Version"] = settings.app_version
-            # CSP for API responses
-            response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
-            # HSTS for HTTPS (1 year, include subdomains)
-            if settings.is_production:
-                response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        return response
+    _SECURITY_HEADERS = [
+        [b"x-content-type-options", b"nosniff"],
+        [b"x-frame-options", b"DENY"],
+        [b"x-xss-protection", b"1; mode=block"],
+        [b"referrer-policy", b"strict-origin-when-cross-origin"],
+        [b"permissions-policy", b"camera=(), microphone=(), geolocation=()"],
+        [b"content-security-policy", b"default-src 'none'; frame-ancestors 'none'"],
+    ]
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_security(message: dict) -> None:
+            if message["type"] == "http.response.start" and settings.enable_security_headers:
+                headers_list = list(message.get("headers", []))
+                headers_list.extend(self._SECURITY_HEADERS)
+                headers_list.append([b"x-harchos-version", settings.app_version.encode()])
+                if settings.is_production:
+                    headers_list.append([b"strict-transport-security", b"max-age=31536000; includeSubDomains"])
+                message["headers"] = headers_list
+            await send(message)
+
+        await self.app(scope, receive, send_with_security)
 
 
 # ---------------------------------------------------------------------------
-# Request logging middleware
+# Request logging middleware (pure ASGI)
 # ---------------------------------------------------------------------------
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """Log all API requests with method, path, status, and duration."""
+class RequestLoggingMiddleware:
+    """Log all API requests with method, path, status, and duration — pure ASGI."""
 
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
         start = time.perf_counter()
-        response = await call_next(request)
-        elapsed_ms = (time.perf_counter() - start) * 1000
+        status_code = 0
 
-        # Skip noisy paths
-        if request.url.path not in ("/docs", "/redoc", "/openapi.json", "/"):
+        async def send_with_logging(message: dict) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 0)
+            await send(message)
+
+        await self.app(scope, receive, send_with_logging)
+
+        path = scope.get("path", "")
+        if path not in ("/docs", "/redoc", "/openapi.json", "/"):
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            method = scope.get("method", "GET")
             logger = logging.getLogger("harchos.requests")
-            logger.info(
-                "%s %s → %d (%.1fms)",
-                request.method,
-                request.url.path,
-                response.status_code,
-                elapsed_ms,
-            )
-
-        return response
+            logger.info("%s %s → %d (%.1fms)", method, path, status_code, elapsed_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +277,7 @@ app.add_exception_handler(Exception, unhandled_error_handler)
 # Middleware (order matters — outermost first in FastAPI)
 # ---------------------------------------------------------------------------
 
-# 1. Request size limit (reject huge payloads early)
+# 1. Request size limit (reject huge payloads early) — pure ASGI
 app.add_middleware(RequestSizeLimitMiddleware)
 
 # 2. Timing middleware (captures full request time)
@@ -255,10 +289,10 @@ app.add_middleware(RequestLoggingMiddleware)
 # 4. Security headers
 app.add_middleware(SecurityHeadersMiddleware)
 
-# 5. Response compression (gzip)
+# 5. Response compression (gzip) — pure ASGI, no body buffering
 app.add_middleware(CompressionMiddleware)
 
-# 6. Response caching for GET endpoints
+# 6. Response caching for GET endpoints — pure ASGI, no body buffering
 app.add_middleware(ResponseCacheMiddleware)
 
 # 7. Rate limiting (tiered, per-API-key)
