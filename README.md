@@ -140,7 +140,7 @@ See [docker-compose.production.yml](docker-compose.production.yml) for PostgreSQ
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HARCHOS_APP_NAME` | HarchOS Server | Application name |
-| `HARCHOS_APP_VERSION` | 0.2.0 | Application version |
+| `HARCHOS_APP_VERSION` | 0.7.0 | Application version |
 | `HARCHOS_DEBUG` | true | Enable debug mode |
 | `HARCHOS_ENVIRONMENT` | dev | Environment: dev/staging/production |
 | `HARCHOS_LOG_LEVEL` | INFO | Logging level |

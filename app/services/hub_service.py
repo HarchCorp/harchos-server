@@ -91,7 +91,7 @@ class HubService:
 
         # --- endpoint ---
         region_slug = hub.region.lower().replace(" ", "-")
-        endpoint = f"https://{region_slug}.harchos.io"
+        endpoint = f"https://{region_slug}.harchos.ai"
 
         return HubResponse(
             metadata=metadata,

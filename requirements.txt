@@ -1,4 +1,4 @@
-# HarchOS Server v0.6.0 - Python Dependencies
+# HarchOS Server v0.7.0 - Python Dependencies
 
 # Web framework
 fastapi==0.115.6
@@ -39,4 +39,3 @@ python-gzip==0.2.1;python_version<"3.12"
 # Testing
 pytest==8.3.4
 pytest-asyncio==0.24.0
-httpx  # Also used for TestClient
