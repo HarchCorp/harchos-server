@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.cache import cache, get_cached_json, set_cached_json
+from app.core.http_client import get_shared_client
 from app.models.carbon import CarbonIntensityRecord, CarbonOptimizationLog
 from app.models.hub import Hub
 from app.schemas.carbon import (
@@ -142,39 +143,39 @@ class CarbonService:
         url = "https://api.electricitymap.org/v3/carbon-intensity/latest"
         headers = {"auth-token": api_key}
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                resp = await client.get(url, params={"zone": zone}, headers=headers)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    
-                    # Also fetch power origin breakdown for fuel mix
-                    fuel_mix = []
-                    try:
-                        power_url = "https://api.electricitymap.org/v3/power-origin/breakdown/latest"
-                        power_resp = await client.get(power_url, params={"zone": zone}, headers=headers)
-                        if power_resp.status_code == 200:
-                            power_data = power_resp.json()
-                            production = power_data.get("production", {})
-                            for source, value in production.items():
-                                if value and value > 0:
-                                    fuel_mix.append({
-                                        "fuel_type": source,
-                                        "percentage": round(value, 2),
-                                    })
-                    except Exception:
-                        pass  # Fuel mix is optional
-                    
-                    return {
-                        "zone": zone,
-                        "carbon_intensity": data.get("carbonIntensity", 0),
-                        "datetime": data.get("datetime", ""),
-                        "updated_at": data.get("updatedAt", ""),
-                        "fuel_mix": fuel_mix,
-                    }
-                logger.warning("Electricity Maps API returned %d for zone %s", resp.status_code, zone)
-            except httpx.HTTPError as exc:
-                logger.warning("Electricity Maps API error for zone %s: %s", zone, exc)
+        client = get_shared_client()
+        try:
+            resp = await client.get(url, params={"zone": zone}, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                
+                # Also fetch power origin breakdown for fuel mix
+                fuel_mix = []
+                try:
+                    power_url = "https://api.electricitymap.org/v3/power-origin/breakdown/latest"
+                    power_resp = await client.get(power_url, params={"zone": zone}, headers=headers)
+                    if power_resp.status_code == 200:
+                        power_data = power_resp.json()
+                        production = power_data.get("production", {})
+                        for source, value in production.items():
+                            if value and value > 0:
+                                fuel_mix.append({
+                                    "fuel_type": source,
+                                    "percentage": round(value, 2),
+                                })
+                except Exception:
+                    pass  # Fuel mix is optional
+                
+                return {
+                    "zone": zone,
+                    "carbon_intensity": data.get("carbonIntensity", 0),
+                    "datetime": data.get("datetime", ""),
+                    "updated_at": data.get("updatedAt", ""),
+                    "fuel_mix": fuel_mix,
+                }
+            logger.warning("Electricity Maps API returned %d for zone %s", resp.status_code, zone)
+        except httpx.HTTPError as exc:
+            logger.warning("Electricity Maps API error for zone %s: %s", zone, exc)
         return None
 
     @staticmethod
@@ -190,22 +191,22 @@ class CarbonService:
         if region:
             url = f"https://api.carbonintensity.org.uk/regional/regionid/{region}"
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    intensity = data.get("data", [{}])[0] if "data" in data else {}
-                    return {
-                        "zone": "GB",
-                        "carbon_intensity": intensity.get("intensity", {}).get("actual", 0)
-                            or intensity.get("intensity", {}).get("forecast", 0),
-                        "datetime": intensity.get("from", ""),
-                        "updated_at": intensity.get("to", ""),
-                    }
-                logger.warning("Carbon Intensity UK API returned %d", resp.status_code)
-            except httpx.HTTPError as exc:
-                logger.warning("Carbon Intensity UK API error: %s", exc)
+        client = get_shared_client()
+        try:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                intensity = data.get("data", [{}])[0] if "data" in data else {}
+                return {
+                    "zone": "GB",
+                    "carbon_intensity": intensity.get("intensity", {}).get("actual", 0)
+                        or intensity.get("intensity", {}).get("forecast", 0),
+                    "datetime": intensity.get("from", ""),
+                    "updated_at": intensity.get("to", ""),
+                }
+            logger.warning("Carbon Intensity UK API returned %d", resp.status_code)
+        except httpx.HTTPError as exc:
+            logger.warning("Carbon Intensity UK API error: %s", exc)
         return None
 
     @staticmethod
@@ -459,19 +460,25 @@ class CarbonService:
         """
         query = select(Hub).where(Hub.status == "ready")
         if region:
-            query = query.where(Hub.region.ilike(f"%{region}%"))
+            # Escape LIKE special characters to prevent pattern injection
+            safe_region = (
+                region.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            query = query.where(Hub.region.ilike(f"%{safe_region}%"))
         if gpu_count:
             query = query.where(Hub.available_gpus >= gpu_count)
 
         result = await db.execute(query)
         hubs = result.scalars().all()
 
-        # Fetch zone intensities sequentially to avoid concurrent AsyncSession usage
+        # Fetch zone intensities in parallel using asyncio.gather
+        import asyncio as _asyncio
         zones = [_hub_to_zone(hub) for hub in hubs]
-        intensities = []
-        for zone in zones:
-            result = await CarbonService.get_zone_intensity(db, zone)
-            intensities.append(result)
+        intensities = await _asyncio.gather(
+            *[CarbonService.get_zone_intensity(db, zone) for zone in zones]
+        )
         
         ranked = []
         for hub, zone, intensity in zip(hubs, zones, intensities):
@@ -749,60 +756,60 @@ class CarbonService:
         api_key = getattr(settings, "electricity_maps_api_key", "")
         if api_key:
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.get(
-                        "https://api.electricitymap.org/v3/carbon-intensity/forecast",
-                        params={"zone": zone},
-                        headers={"auth-token": api_key},
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        forecast_points = data.get("forecast", [])
-                        if forecast_points:
-                            points = []
-                            green_windows = []
-                            current_green_start = None
+                client = get_shared_client()
+                resp = await client.get(
+                    "https://api.electricitymap.org/v3/carbon-intensity/forecast",
+                    params={"zone": zone},
+                    headers={"auth-token": api_key},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    forecast_points = data.get("forecast", [])
+                    if forecast_points:
+                        points = []
+                        green_windows = []
+                        current_green_start = None
 
-                            for fp in forecast_points[: hours * 4]:  # 15-min intervals
-                                ci = fp.get("carbonIntensity", base_intensity)
-                                dt_str = fp.get("datetime", "")
-                                try:
-                                    dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-                                except (ValueError, AttributeError):
-                                    dt = now + timedelta(minutes=15 * len(points))
-                                is_green = ci <= GREEN_THRESHOLD_GCO2
+                        for fp in forecast_points[: hours * 4]:  # 15-min intervals
+                            ci = fp.get("carbonIntensity", base_intensity)
+                            dt_str = fp.get("datetime", "")
+                            try:
+                                dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                            except (ValueError, AttributeError):
+                                dt = now + timedelta(minutes=15 * len(points))
+                            is_green = ci <= GREEN_THRESHOLD_GCO2
 
-                                points.append(CarbonForecastPoint(
-                                    datetime=dt,
-                                    carbon_intensity_gco2_kwh=ci,
-                                    renewable_percentage=min(100, base_renewable + (base_intensity - ci) / 5),
-                                    is_green=is_green,
-                                ))
+                            points.append(CarbonForecastPoint(
+                                datetime=dt,
+                                carbon_intensity_gco2_kwh=ci,
+                                renewable_percentage=min(100, base_renewable + (base_intensity - ci) / 5),
+                                is_green=is_green,
+                            ))
 
-                                # Track green windows
-                                if is_green and current_green_start is None:
-                                    current_green_start = dt
-                                elif not is_green and current_green_start is not None:
-                                    green_windows.append({
-                                        "start": current_green_start.isoformat(),
-                                        "end": dt.isoformat(),
-                                        "estimated_carbon_intensity_gco2_kwh": ci,
-                                    })
-                                    current_green_start = None
-
-                            if current_green_start is not None and points:
+                            # Track green windows
+                            if is_green and current_green_start is None:
+                                current_green_start = dt
+                            elif not is_green and current_green_start is not None:
                                 green_windows.append({
                                     "start": current_green_start.isoformat(),
-                                    "end": points[-1].reading_datetime.isoformat(),
-                                    "estimated_carbon_intensity_gco2_kwh": GREEN_THRESHOLD_GCO2,
+                                    "end": dt.isoformat(),
+                                    "estimated_carbon_intensity_gco2_kwh": ci,
                                 })
+                                current_green_start = None
 
-                            return CarbonForecastResponse(
-                                zone=zone,
-                                zone_name=static["zone_name"],
-                                forecast=points,
-                                green_windows=green_windows,
-                            )
+                        if current_green_start is not None and points:
+                            green_windows.append({
+                                "start": current_green_start.isoformat(),
+                                "end": points[-1].reading_datetime.isoformat(),
+                                "estimated_carbon_intensity_gco2_kwh": GREEN_THRESHOLD_GCO2,
+                            })
+
+                        return CarbonForecastResponse(
+                            zone=zone,
+                            zone_name=static["zone_name"],
+                            forecast=points,
+                            green_windows=green_windows,
+                        )
             except httpx.HTTPError as exc:
                 logger.warning("Electricity Maps forecast API error: %s", exc)
 

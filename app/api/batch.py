@@ -43,6 +43,7 @@ import httpx
 from app.api.deps import require_auth
 from app.config import settings
 from app.core.exceptions import HarchOSError, rate_limit_exceeded, not_found, validation_error
+from app.core.http_client import get_shared_client
 from app.database import get_db, async_session_factory
 from app.models.api_key import ApiKey
 from app.models.batch import BatchJob
@@ -568,10 +569,9 @@ async def _process_batch_item(
         }
         url = f"{backend_url.rstrip('/')}/chat/completions"
 
-        # Call the backend with timeout
-        timeout = httpx.Timeout(30.0, connect=5.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=body, headers=headers)
+        # Call the backend with shared client
+        client = get_shared_client()
+        resp = await client.post(url, json=body, headers=headers)
 
         if resp.status_code != 200:
             error_detail = f"Backend returned HTTP {resp.status_code}"

@@ -8,7 +8,9 @@ primary_region = "cdg"
   HARCHOS_DATABASE_URL = "sqlite+aiosqlite:///./harchos.db"
   HARCHOS_DEBUG = "false"
   HARCHOS_ENVIRONMENT = "production"
-  HARCHOS_SECRET_KEY = "harchos-prod-secret-key-2026"
+  # HARCHOS_SECRET_KEY = set via fly secrets set HARCHOS_SECRET_KEY=<value>
+  # HARCHOS_DEFAULT_API_KEY = set via fly secrets set HARCHOS_DEFAULT_API_KEY=<value>
+  # HARCHOS_ADMIN_BOOTSTRAP_TOKEN = set via fly secrets set HARCHOS_ADMIN_BOOTSTRAP_TOKEN=<value>
 
 [http_service]
   internal_port = 8000

@@ -207,6 +207,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # Close shared HTTP client
+    try:
+        from app.core.http_client import close_shared_client
+        await close_shared_client()
+    except Exception:
+        pass
+
     await close_db()
     logger.info("HarchOS Server shutting down")
 
@@ -306,10 +313,20 @@ cors_origins = settings.cors_origins
 if not cors_origins and settings.is_development:
     cors_origins = ["http://localhost:3000", "http://localhost:8000", "http://127.0.0.1:3000"]
 
+# Security: allow_credentials=True is incompatible with wildcard origins
+# per CORS spec (credentials + wildcard = security hole)
+allow_credentials = True
+if "*" in cors_origins:
+    allow_credentials = False
+    logger.warning(
+        "CORS: allow_credentials disabled because wildcard origin '*' is configured. "
+        "Set HARCHOS_CORS_ORIGINS to specific domains to enable credentials."
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials=True,
+    allow_credentials=allow_credentials,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "X-API-Key", "Content-Type"],
 )

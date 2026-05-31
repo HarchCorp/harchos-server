@@ -60,8 +60,12 @@ RATE_LIMIT_TIERS = {
 class InMemoryRateLimiter:
     """Sliding window rate limiter for single-instance deployments."""
 
+    CLEANUP_INTERVAL = 100  # Run cleanup every 100 requests
+    STALE_THRESHOLD_SECONDS = 120  # Remove keys with no requests in last 2 min
+
     def __init__(self):
         self._requests: dict[str, list[float]] = defaultdict(list)
+        self._request_count = 0
 
     def is_allowed(self, key: str, max_requests: int, window_seconds: int = 60) -> tuple[bool, int, int]:
         now = time.time()
@@ -73,7 +77,24 @@ class InMemoryRateLimiter:
         if current_count >= max_requests:
             return False, 0, reset_at
         self._requests[key].append(now)
+
+        # Periodic cleanup of stale entries
+        self._request_count += 1
+        if self._request_count >= self.CLEANUP_INTERVAL:
+            self._request_count = 0
+            self._cleanup_stale(now)
+
         return True, remaining - 1, reset_at
+
+    def _cleanup_stale(self, now: float) -> None:
+        """Remove keys with no recent requests to prevent memory leaks."""
+        stale_cutoff = now - self.STALE_THRESHOLD_SECONDS
+        stale_keys = [
+            key for key, timestamps in self._requests.items()
+            if not timestamps or timestamps[-1] < stale_cutoff
+        ]
+        for key in stale_keys:
+            del self._requests[key]
 
 
 _memory_limiter = InMemoryRateLimiter()
@@ -84,16 +105,28 @@ _memory_limiter = InMemoryRateLimiter()
 # ---------------------------------------------------------------------------
 
 def _get_client_ip(scope: Scope) -> str:
-    """Get client IP from ASGI scope."""
+    """Get client IP from ASGI scope.
+
+    Only trusts X-Forwarded-For when the request comes from a trusted proxy
+    (configured via HARCHOS_TRUSTED_PROXIES). This prevents IP spoofing
+    bypassing rate limits.
+    """
     client = scope.get("client")
-    if client:
-        return client[0]
-    # Check X-Forwarded-For
-    headers = dict(scope.get("headers", []))
-    forwarded = headers.get(b"x-forwarded-for", b"").decode("latin-1", errors="ignore")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return "unknown"
+    direct_ip = client[0] if client else "unknown"
+
+    # Only use X-Forwarded-For if the direct connection is from a trusted proxy
+    trusted_proxies = settings.trusted_proxies
+    if trusted_proxies and direct_ip in trusted_proxies:
+        headers = dict(scope.get("headers", []))
+        forwarded = headers.get(b"x-forwarded-for", b"").decode("latin-1", errors="ignore")
+        if forwarded:
+            # Take the last entry added by our trusted proxy (rightmost)
+            # Leftmost entries could be spoofed by previous hops
+            ips = [ip.strip() for ip in forwarded.split(",") if ip.strip()]
+            if ips:
+                return ips[-1]
+
+    return direct_ip
 
 
 def _is_inference_endpoint(path: str) -> bool:

@@ -47,6 +47,7 @@ from app.models.model import Model as DBModel
 from app.api.deps import require_auth, check_model_access, check_region_access, check_token_budget, check_spending_limit
 from app.config import settings
 from app.core.exceptions import model_not_available, inference_timeout, HarchOSError
+from app.core.http_client import get_shared_client
 
 logger = logging.getLogger("harchos.openai_compat")
 router = APIRouter()
@@ -195,17 +196,17 @@ async def list_models(
     backend_url = getattr(settings, "inference_backend_url", "")
     if backend_url:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    f"{backend_url.rstrip('/')}/models",
-                    headers={"Authorization": f"Bearer {settings.inference_backend_api_key}"},
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return OpenAIModelListResponse(data=[
-                        OpenAIModelInfo(id=m["id"], created=m.get("created", 1700000000), owned_by="harchos")
-                        for m in data.get("data", [])
-                    ])
+            client = get_shared_client()
+            resp = await client.get(
+                f"{backend_url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {settings.inference_backend_api_key}"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return OpenAIModelListResponse(data=[
+                    OpenAIModelInfo(id=m["id"], created=m.get("created", 1700000000), owned_by="harchos")
+                    for m in data.get("data", [])
+                ])
         except Exception:
             pass
 
@@ -291,70 +292,70 @@ async def chat_completions(
     url = f"{backend_url.rstrip('/')}/chat/completions"
     timeout = httpx.Timeout(120.0 if request.stream else 30.0, connect=5.0)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            if request.stream:
-                # Streaming: use aiter_lines for SSE passthrough
-                async with client.stream("POST", url, json=body, headers=headers) as resp:
-                    if resp.status_code != 200:
-                        raise HarchOSError("E0500", detail=f"Backend returned {resp.status_code}")
-
-                    async def stream_generate() -> AsyncIterator[str]:
-                        async for line in resp.aiter_lines():
-                            if line.startswith("data: ") and line != "data: [DONE]":
-                                yield line + "\n\n"
-                            elif line == "data: [DONE]":
-                                # Inject carbon data before DONE
-                                elapsed = time.time() - start_time
-                                carbon = _estimate_carbon(request.model, 0, 0, ci, renewable, hub_region)
-                                carbon.inference_duration_seconds = round(elapsed, 3)
-                                carbon_chunk = {
-                                    "object": "carbon_footprint",
-                                    "carbon_footprint": carbon.model_dump(),
-                                }
-                                yield f"data: {json.dumps(carbon_chunk)}\n\n"
-                                yield "data: [DONE]\n\n"
-
-                    return StreamingResponse(
-                        stream_generate(),
-                        media_type="text/event-stream",
-                        headers={
-                            "Cache-Control": "no-cache",
-                            "Connection": "keep-alive",
-                            "X-Carbon-Intensity": str(ci),
-                            "X-Renewable-Percentage": str(renewable),
-                        },
-                    )
-            else:
-                resp = await client.post(url, json=body, headers=headers)
+    client = get_shared_client()
+    try:
+        if request.stream:
+            # Streaming: use aiter_lines for SSE passthrough
+            async with client.stream("POST", url, json=body, headers=headers, timeout=timeout) as resp:
                 if resp.status_code != 200:
                     raise HarchOSError("E0500", detail=f"Backend returned {resp.status_code}")
 
-                resp_data = resp.json()
-                elapsed = time.time() - start_time
+                async def stream_generate() -> AsyncIterator[str]:
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data: ") and line != "data: [DONE]":
+                            yield line + "\n\n"
+                        elif line == "data: [DONE]":
+                            # Inject carbon data before DONE
+                            elapsed = time.time() - start_time
+                            carbon = _estimate_carbon(request.model, 0, 0, ci, renewable, hub_region)
+                            carbon.inference_duration_seconds = round(elapsed, 3)
+                            carbon_chunk = {
+                                "object": "carbon_footprint",
+                                "carbon_footprint": carbon.model_dump(),
+                            }
+                            yield f"data: {json.dumps(carbon_chunk)}\n\n"
+                            yield "data: [DONE]\n\n"
 
-                # Add carbon tracking
-                usage = resp_data.get("usage", {})
-                prompt_tokens = usage.get("prompt_tokens", 0) or 0
-                completion_tokens = usage.get("completion_tokens", 0) or 0
-
-                carbon = _estimate_carbon(request.model, prompt_tokens, completion_tokens, ci, renewable, hub_region)
-                carbon.inference_duration_seconds = round(elapsed, 3)
-                resp_data["carbon_footprint"] = carbon.model_dump()
-
-                return JSONResponse(
-                    content=resp_data,
+                return StreamingResponse(
+                    stream_generate(),
+                    media_type="text/event-stream",
                     headers={
-                        "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
                         "X-Carbon-Intensity": str(ci),
                         "X-Renewable-Percentage": str(renewable),
                     },
                 )
-        except httpx.TimeoutException:
-            raise inference_timeout(request.model, timeout_seconds=30)
-        except httpx.HTTPError as exc:
-            logger.error("Inference backend error: %s", exc)
-            raise HarchOSError("E0500", detail=f"Inference backend unavailable: {exc}")
+        else:
+            resp = await client.post(url, json=body, headers=headers)
+            if resp.status_code != 200:
+                raise HarchOSError("E0500", detail=f"Backend returned {resp.status_code}")
+
+            resp_data = resp.json()
+            elapsed = time.time() - start_time
+
+            # Add carbon tracking
+            usage = resp_data.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0) or 0
+            completion_tokens = usage.get("completion_tokens", 0) or 0
+
+            carbon = _estimate_carbon(request.model, prompt_tokens, completion_tokens, ci, renewable, hub_region)
+            carbon.inference_duration_seconds = round(elapsed, 3)
+            resp_data["carbon_footprint"] = carbon.model_dump()
+
+            return JSONResponse(
+                content=resp_data,
+                headers={
+                    "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
+                    "X-Carbon-Intensity": str(ci),
+                    "X-Renewable-Percentage": str(renewable),
+                },
+            )
+    except httpx.TimeoutException:
+        raise inference_timeout(request.model, timeout_seconds=30)
+    except httpx.HTTPError as exc:
+        logger.error("Inference backend error: %s", exc)
+        raise HarchOSError("E0500", detail=f"Inference backend unavailable: {exc}")
 
 
 @router.post("/completions")
@@ -404,37 +405,37 @@ async def completions(
     url = f"{backend_url.rstrip('/')}/completions"
     timeout = httpx.Timeout(120.0 if request.stream else 30.0, connect=5.0)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.post(url, json=body, headers=headers)
-            if resp.status_code != 200:
-                raise HarchOSError("E0500", detail=f"Backend returned {resp.status_code}")
+    client = get_shared_client()
+    try:
+        resp = await client.post(url, json=body, headers=headers)
+        if resp.status_code != 200:
+            raise HarchOSError("E0500", detail=f"Backend returned {resp.status_code}")
 
-            resp_data = resp.json()
-            elapsed = time.time() - start_time
+        resp_data = resp.json()
+        elapsed = time.time() - start_time
 
-            # Add carbon tracking
-            usage = resp_data.get("usage", {})
-            prompt_tokens = usage.get("prompt_tokens", 0) or 0
-            completion_tokens = usage.get("completion_tokens", 0) or 0
+        # Add carbon tracking
+        usage = resp_data.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0) or 0
+        completion_tokens = usage.get("completion_tokens", 0) or 0
 
-            carbon = _estimate_carbon(request.model, prompt_tokens, completion_tokens, ci, renewable, hub_region)
-            carbon.inference_duration_seconds = round(elapsed, 3)
-            resp_data["carbon_footprint"] = carbon.model_dump()
+        carbon = _estimate_carbon(request.model, prompt_tokens, completion_tokens, ci, renewable, hub_region)
+        carbon.inference_duration_seconds = round(elapsed, 3)
+        resp_data["carbon_footprint"] = carbon.model_dump()
 
-            return JSONResponse(
-                content=resp_data,
-                headers={
-                    "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
-                    "X-Carbon-Intensity": str(ci),
-                    "X-Renewable-Percentage": str(renewable),
-                },
-            )
-        except httpx.TimeoutException:
-            raise inference_timeout(request.model, timeout_seconds=30)
-        except httpx.HTTPError as exc:
-            logger.error("Inference backend error: %s", exc)
-            raise HarchOSError("E0500", detail=f"Inference backend unavailable: {exc}")
+        return JSONResponse(
+            content=resp_data,
+            headers={
+                "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
+                "X-Carbon-Intensity": str(ci),
+                "X-Renewable-Percentage": str(renewable),
+            },
+        )
+    except httpx.TimeoutException:
+        raise inference_timeout(request.model, timeout_seconds=30)
+    except httpx.HTTPError as exc:
+        logger.error("Inference backend error: %s", exc)
+        raise HarchOSError("E0500", detail=f"Inference backend unavailable: {exc}")
 
 
 @router.post("/embeddings")
@@ -466,38 +467,37 @@ async def embeddings(
         "Authorization": f"Bearer {backend_key}",
     }
     url = f"{backend_url.rstrip('/')}/embeddings"
-    timeout = httpx.Timeout(30.0, connect=5.0)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.post(url, json=body, headers=headers)
-            if resp.status_code != 200:
-                raise HarchOSError("E0500", detail=f"Backend returned {resp.status_code}")
+    client = get_shared_client()
+    try:
+        resp = await client.post(url, json=body, headers=headers)
+        if resp.status_code != 200:
+            raise HarchOSError("E0500", detail=f"Backend returned {resp.status_code}")
 
-            resp_data = resp.json()
-            elapsed = time.time() - start_time
+        resp_data = resp.json()
+        elapsed = time.time() - start_time
 
-            # Add carbon tracking
-            usage = resp_data.get("usage", {})
-            total_tokens = usage.get("prompt_tokens", 0) or 0
+        # Add carbon tracking
+        usage = resp_data.get("usage", {})
+        total_tokens = usage.get("prompt_tokens", 0) or 0
 
-            from app.services.carbon_service import CarbonService
-            intensity = await CarbonService.get_zone_intensity(db, "MA")
-            emb_hub_region = getattr(intensity, 'zone_name', '') or "Morocco"
-            carbon = _estimate_carbon(request.model, total_tokens, 0, intensity.carbon_intensity_gco2_kwh, intensity.renewable_percentage, emb_hub_region)
-            carbon.inference_duration_seconds = round(elapsed, 3)
-            resp_data["carbon_footprint"] = carbon.model_dump()
+        from app.services.carbon_service import CarbonService
+        intensity = await CarbonService.get_zone_intensity(db, "MA")
+        emb_hub_region = getattr(intensity, 'zone_name', '') or "Morocco"
+        carbon = _estimate_carbon(request.model, total_tokens, 0, intensity.carbon_intensity_gco2_kwh, intensity.renewable_percentage, emb_hub_region)
+        carbon.inference_duration_seconds = round(elapsed, 3)
+        resp_data["carbon_footprint"] = carbon.model_dump()
 
-            return JSONResponse(
-                content=resp_data,
-                headers={
-                    "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
-                    "X-Carbon-Intensity": str(intensity.carbon_intensity_gco2_kwh),
-                    "X-Renewable-Percentage": str(intensity.renewable_percentage),
-                },
-            )
-        except httpx.TimeoutException:
-            raise inference_timeout(request.model, timeout_seconds=30)
-        except httpx.HTTPError as exc:
-            logger.error("Embeddings backend error: %s", exc)
-            raise HarchOSError("E0500", detail=f"Embeddings backend unavailable: {exc}")
+        return JSONResponse(
+            content=resp_data,
+            headers={
+                "X-Carbon-Footprint-gCO2": str(carbon.gco2_per_request),
+                "X-Carbon-Intensity": str(intensity.carbon_intensity_gco2_kwh),
+                "X-Renewable-Percentage": str(intensity.renewable_percentage),
+            },
+        )
+    except httpx.TimeoutException:
+        raise inference_timeout(request.model, timeout_seconds=30)
+    except httpx.HTTPError as exc:
+        logger.error("Embeddings backend error: %s", exc)
+        raise HarchOSError("E0500", detail=f"Embeddings backend unavailable: {exc}")

@@ -23,16 +23,16 @@ value = "production"
 
 [[deploy.env]]
 name = "HARCHOS_SECRET_KEY"
-value = "harchos-prod-secret-key-2026"
+value = "${HARCHOS_SECRET_KEY}"  # e.g. harchos-prod-secret-key-2026
 
 [[deploy.env]]
 name = "HARCHOS_CORS_ORIGINS"
-value = "[\"*\"]"
+value = "${HARCHOS_CORS_ORIGINS}"  # e.g. ["https://harchcorp.vercel.app","https://api.harchos.ai"]
 
 [[deploy.env]]
 name = "HARCHOS_DEFAULT_API_KEY"
-value = "hsk_prod_e2e_test_2026_morocco"
+value = "${HARCHOS_DEFAULT_API_KEY}"  # e.g. hsk_prod_e2e_test_2026_morocco
 
 [[deploy.env]]
 name = "HARCHOS_ADMIN_BOOTSTRAP_TOKEN"
-value = "harchos-bootstrap-admin-2026-secure"
+value = "${HARCHOS_ADMIN_BOOTSTRAP_TOKEN}"  # e.g. harchos-bootstrap-admin-2026-secure

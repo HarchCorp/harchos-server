@@ -24,6 +24,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.core.http_client import get_shared_client
 
 logger = logging.getLogger("harchos.events")
 
@@ -184,22 +185,22 @@ class WebhookDelivery:
 
         for attempt in range(WebhookDelivery.MAX_RETRIES):
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.post(
-                        webhook.url,
-                        content=body,
-                        headers=headers,
+                client = get_shared_client()
+                resp = await client.post(
+                    webhook.url,
+                    content=body,
+                    headers=headers,
+                )
+                if 200 <= resp.status_code < 300:
+                    logger.info(
+                        "Webhook delivered: %s → %s (status=%d)",
+                        event.type.value, webhook.url, resp.status_code,
                     )
-                    if 200 <= resp.status_code < 300:
-                        logger.info(
-                            "Webhook delivered: %s → %s (status=%d)",
-                            event.type.value, webhook.url, resp.status_code,
-                        )
-                        return True
-                    logger.warning(
-                        "Webhook delivery failed: %s → %s (status=%d, attempt=%d)",
-                        event.type.value, webhook.url, resp.status_code, attempt + 1,
-                    )
+                    return True
+                logger.warning(
+                    "Webhook delivery failed: %s → %s (status=%d, attempt=%d)",
+                    event.type.value, webhook.url, resp.status_code, attempt + 1,
+                )
             except httpx.HTTPError as exc:
                 logger.warning(
                     "Webhook delivery error: %s → %s (%s, attempt=%d)",

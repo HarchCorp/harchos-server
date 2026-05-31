@@ -35,6 +35,7 @@ from app.cache import get_cached_json, set_cached_json
 from app.core.exceptions import model_not_available, inference_timeout, HarchOSError
 from app.core.enums import CarbonPreference
 from app.api.monitoring import sanitize_error_detail
+from app.core.http_client import get_shared_client
 
 logger = logging.getLogger("harchos.inference")
 router = APIRouter()
@@ -296,15 +297,15 @@ async def _proxy_to_backend(
     if is_stream:
         timeout = httpx.Timeout(120.0, connect=5.0)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.post(url, json=request_body, headers=headers)
-            return resp
-        except httpx.TimeoutException:
-            raise inference_timeout(model_id, timeout_seconds=30)
-        except httpx.HTTPError as exc:
-            logger.error("Inference backend error: %s", exc)
-            raise HarchOSError("E0500", detail=f"Inference backend unavailable: {exc}")
+    client = get_shared_client()
+    try:
+        resp = await client.post(url, json=request_body, headers=headers)
+        return resp
+    except httpx.TimeoutException:
+        raise inference_timeout(model_id, timeout_seconds=30)
+    except httpx.HTTPError as exc:
+        logger.error("Inference backend error: %s", exc)
+        raise HarchOSError("E0500", detail=f"Inference backend unavailable: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -328,38 +329,37 @@ async def list_inference_models(
     backend_url = getattr(settings, "inference_backend_url", "")
     if backend_url:
         try:
-            import httpx
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    f"{backend_url.rstrip('/')}/models",
-                    headers={"Authorization": f"Bearer {settings.inference_backend_api_key}"},
-                )
-                if resp.status_code == 200:
-                    backend_data = resp.json()
-                    backend_models = backend_data.get("data", [])
-                    # Get carbon data from service — no hardcoded values
-                    carbon_intensity = 0.0
-                    hub_region_name = ""
-                    try:
-                        from app.services.carbon_service import CarbonService
-                        ci = await CarbonService.get_zone_intensity(db, "MA")
-                        carbon_intensity = ci.carbon_intensity_gco2_kwh
-                        hub_region_name = ci.zone_name or "Morocco"
-                    except Exception:
-                        pass
-                    models = [
-                        ModelInfo(
-                            id=m.get("id", ""),
-                            created=m.get("created", 1700000000),
-                            owned_by="harchos",
-                            carbon_intensity_gco2_kwh=carbon_intensity,
-                            hub_region=hub_region_name,
-                            family="",
-                            parameter_count_b=0,
-                        )
-                        for m in backend_models
-                    ]
-                    return ModelListResponse(data=models)
+            client = get_shared_client()
+            resp = await client.get(
+                f"{backend_url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {settings.inference_backend_api_key}"},
+            )
+            if resp.status_code == 200:
+                backend_data = resp.json()
+                backend_models = backend_data.get("data", [])
+                # Get carbon data from service — no hardcoded values
+                carbon_intensity = 0.0
+                hub_region_name = ""
+                try:
+                    from app.services.carbon_service import CarbonService
+                    ci = await CarbonService.get_zone_intensity(db, "MA")
+                    carbon_intensity = ci.carbon_intensity_gco2_kwh
+                    hub_region_name = ci.zone_name or "Morocco"
+                except Exception:
+                    pass
+                models = [
+                    ModelInfo(
+                        id=m.get("id", ""),
+                        created=m.get("created", 1700000000),
+                        owned_by="harchos",
+                        carbon_intensity_gco2_kwh=carbon_intensity,
+                        hub_region=hub_region_name,
+                        family="",
+                        parameter_count_b=0,
+                    )
+                    for m in backend_models
+                ]
+                return ModelListResponse(data=models)
         except Exception:
             pass  # Fall back to local catalog
 

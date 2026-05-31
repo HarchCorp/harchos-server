@@ -63,14 +63,16 @@ class CompressionMiddleware:
 
         # Intercept response to potentially compress
         response_started = False
+        response_status = 200
         response_headers = {}
         body_parts = []
 
         async def send_wrapper(message: dict) -> None:
-            nonlocal response_started, response_headers, body_parts
+            nonlocal response_started, response_status, response_headers, body_parts
 
             if message["type"] == "http.response.start":
                 response_started = True
+                response_status = message.get("status", 200)
                 response_headers = dict(message.get("headers", []))
                 # Don't send yet — we need to check if we should compress
                 return
@@ -85,7 +87,7 @@ class CompressionMiddleware:
                         # First chunk of streaming — send the start message now
                         await send({
                             "type": "http.response.start",
-                            "status": 200,
+                            "status": response_status,
                             "headers": list(response_headers.items()) if isinstance(response_headers, dict) else response_headers,
                         })
                     body_parts.append(body)
@@ -114,7 +116,7 @@ class CompressionMiddleware:
 
                         await send({
                             "type": "http.response.start",
-                            "status": 200,
+                            "status": response_status,
                             "headers": list(response_headers.items()) if isinstance(response_headers, dict) else response_headers,
                         })
                         await send({
@@ -127,7 +129,7 @@ class CompressionMiddleware:
                 # Not compressing — send as-is
                 await send({
                     "type": "http.response.start",
-                    "status": 200,
+                    "status": response_status,
                     "headers": list(response_headers.items()) if isinstance(response_headers, dict) else response_headers,
                 })
                 await send({
